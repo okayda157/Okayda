@@ -26,8 +26,15 @@ Write-Host "[VIctory] Modo=$Mode | Bin=$Runner"
 Write-Host "[VIctory] Logs desta sessao: $rawLog"
 Write-Host "[VIctory] Relatorio automatico: $latestReport"
 
+$GameExeClean = $GameExe.Trim().Trim('"')
+if (-not (Test-Path -LiteralPath $GameExeClean -PathType Leaf)) {
+    Write-Error "Executavel do jogo nao encontrado: $GameExeClean"
+    exit 2
+}
+$QuotedGameExe = '"' + $GameExeClean + '"'
+
 $p = Start-Process -FilePath $Runner `
-    -ArgumentList @('run', $GameExe, '--console', $Console, '--execute') `
+    -ArgumentList @('run', $QuotedGameExe, '--console', $Console, '--execute') `
     -WorkingDirectory $root `
     -WindowStyle Normal `
     -RedirectStandardOutput $rawLog `

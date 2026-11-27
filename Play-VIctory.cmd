@@ -1,16 +1,31 @@
 @echo off
 setlocal EnableExtensions DisableDelayedExpansion
-if not defined VICTORY_GAME_DIR set "VICTORY_GAME_DIR=%~dp0..\GTA6.Xbox.v1.0.2.1"
+set "root=%~dp0"
+if "%root:~-1%"=="\" set "root=%root:~0,-1%"
+
+:: Resolve modo (release/diag/safe) e pasta do jogo automaticamente:
+:: 1) Pasta/exe arrastado ou passado como argumento
+:: 2) Variavel VICTORY_GAME_DIR
+:: 3) Arquivo local .victory-game-dir ou victory.toml ([paths] game_dir)
+:: 4) Varredura rapida nas pastas vizinhas e discos locais (com suporte a espacos)
+set "mode=release"
+set "resolved_dir="
+set "V_ARG1=%~1"
+set "V_ARG2=%~2"
+for /f "usebackq tokens=1* delims==" %%A in (`powershell -NoProfile -ExecutionPolicy Bypass -File "%root%\scripts\Resolve-GameExe.ps1" -Root "%root%" -Interactive`) do (
+  if /i "%%A"=="MODE" set "mode=%%B"
+  if /i "%%A"=="GAME_DIR" set "resolved_dir=%%B"
+)
+set "V_ARG1="
+set "V_ARG2="
+if defined resolved_dir set "VICTORY_GAME_DIR=%resolved_dir%"
+if not defined VICTORY_GAME_DIR set "VICTORY_GAME_DIR=%root%\..\GTA6.Xbox.v1.0.2.1"
 if not exist "%VICTORY_GAME_DIR%\game_scarlett_master.exe" (
-  echo Set VICTORY_GAME_DIR to your own dump folder containing game_scarlett_master.exe. 1>&2
+  echo Nao foi possivel localizar game_scarlett_master.exe. 1>&2
+  echo Use: powershell -ExecutionPolicy Bypass -File scripts\Link-Game.ps1 -Path "C:\pasta\do\jogo" -Run 1>&2
+  echo Ou defina VICTORY_GAME_DIR / arraste a pasta do jogo sobre Play-VIctory.cmd. 1>&2
   exit /b 2
 )
-
-:: Padrao: target\release (thin LTO, sem overhead de instrumentacao diag, com HUD F3 e pipeline book).
-:: Use "Play-VIctory.cmd diag" para abrir com depuracao DRED completa, ou "Play-VIctory.cmd safe" sem ports experimentais.
-set "mode=release"
-if /i "%~1"=="diag" set "mode=diag"
-if /i "%~1"=="safe" set "mode=safe"
 
 if /i "%mode%"=="diag" (
   set "runner=%~dp0target\diag\victory.exe"

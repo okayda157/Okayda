@@ -7,13 +7,20 @@
 # -More         other settings: -More @{VICTORY_PANEL='1'}
 # Run it from a normal window, not as administrator: the driver then keeps its shader cache elsewhere.
 param(
-    [Parameter(Mandatory)][string]$Exe,
+    [string]$Exe = '',
     [switch]$Safe,
     [switch]$RayTracing,
     [ValidateSet('quality', 'balanced', 'performance')][string]$Fsr4K,
     [ValidateSet('diag', 'release')][string]$Build = 'diag',
     [hashtable]$More = @{}
 )
+if (-not $Exe) {
+    $root = Join-Path $PSScriptRoot '..'
+    $lines = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'Resolve-GameExe.ps1') -Root $root
+    $found = ($lines | Where-Object { $_ -like 'GAME_DIR=*' } | Select-Object -First 1)
+    if ($found) { $Exe = Join-Path ($found.Substring('GAME_DIR='.Length)) 'game_scarlett_master.exe' }
+}
+if (-not $Exe) { Write-Host "Informe -Exe ou rode scripts\Link-Game.ps1 -Path <pasta_do_jogo>."; exit 1 }
 $settings = @{
     VICTORY_TEXTURE_NO_WAIT = '1'; VICTORY_RELAY = '2'; VICTORY_WIDE_BACK = '1'; VICTORY_CARD_REHASH_RUNS = '1'
     VICTORY_JOIN_COPIES = '1'; VICTORY_INDIRECT_WINDOW = '1'; VICTORY_RELAY_COPY = '1'; VICTORY_CARD_STEPS = '2'

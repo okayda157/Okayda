@@ -56,6 +56,22 @@ Sem o construtor BVH em tempo real (`VICTORY_BVH_BUILDER=0`), o shader original 
 
 ---
 
+## Ponte automática para a pasta do jogo (Usuários e IAs)
+
+Não é necessário editar caminhos na mão nem quebrar em pastas com espaços (ex.: `C:\jogos hidra\GTA6.Xbox.v1.0.2.1-CYBERLEEK`). O launcher [`Play-VIctory.cmd`](Play-VIctory.cmd) resolve `game_scarlett_master.exe` via [`scripts/Resolve-GameExe.ps1`](scripts/Resolve-GameExe.ps1) nesta ordem:
+
+1. **Arrastar e soltar / argumento:** arraste a pasta do jogo (ou o próprio `game_scarlett_master.exe`) para cima do `Play-VIctory.cmd`, ou rode `Play-VIctory.cmd "C:\caminho\do\jogo"` (salva automaticamente em `.victory-game-dir`, ignorado pelo git).
+2. **Variável de ambiente:** `VICTORY_GAME_DIR` (pasta do jogo ou caminho completo do `.exe`).
+3. **Config local:** arquivo `.victory-game-dir` na raiz ou `[paths] game_dir` em `victory.toml`.
+4. **Auto-detecção nos discos locais:** procura pastas vizinhas (`..\GTA6*`) e varre os discos fixos locais (`1–2` níveis), salvando `.victory-game-dir` na primeira execução.
+5. **Ponte em 1 comando (ideal para IAs e automação):**
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File scripts\Link-Game.ps1 -Path "C:\jogos hidra\GTA6.Xbox.v1.0.2.1-CYBERLEEK" -Run
+   ```
+   (Sem `-Path`, o `Link-Game.ps1` localiza o jogo sozinho, grava `.victory-game-dir` + `victory.toml` e, com `-Run`, abre o `Play-VIctory.cmd` direto.)
+
+---
+
 ## Como compilar e usar
 
 Pré-requisitos: Windows 10/11 x64 (CPU AVX2), GPU Direct3D 12 (SM 6.6 + Mesh Shaders), Rust toolchain + MSVC Build Tools, e sua pasta própria contendo `game_scarlett_master.exe`.
