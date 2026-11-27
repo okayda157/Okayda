@@ -2,7 +2,7 @@
 param(
     [Parameter(Mandatory)][string]$Runner,
     [Parameter(Mandatory)][string]$GameExe,
-    [string]$Console = 'series-s',
+    [string]$Console = 'series-x',
     [string]$Mode = 'release'
 )
 

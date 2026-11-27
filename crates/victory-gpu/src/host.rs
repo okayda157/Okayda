@@ -9487,13 +9487,59 @@ fn swap_format(format: DXGI_FORMAT) -> Option<DXGI_FORMAT> {
     })
 }
 
-const BUFFERS: u32 = 2;
+const BUFFERS: u32 = 3;
+
+/// Whether swap-chain presentation synchronizes to VSync (`VICTORY_VSYNC=1`;
+/// off by default so presents do not cap or pace frames).
+fn vsync_on() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("VICTORY_VSYNC").is_ok_and(|v| v.trim() == "1"))
+}
+
+/// Queries whether the DXGI factory permits tearing presents on flip-model swap chains.
+fn tearing_supported(factory: &IDXGIFactory2) -> bool {
+    let Ok(factory5) = factory.cast::<IDXGIFactory5>() else {
+        return false;
+    };
+    let mut allow: u32 = 0;
+    // SAFETY: `allow` is a 4-byte BOOL receiving DXGI_FEATURE_PRESENT_ALLOW_TEARING.
+    unsafe {
+        factory5
+            .CheckFeatureSupport(
+                DXGI_FEATURE_PRESENT_ALLOW_TEARING,
+                (&raw mut allow).cast(),
+                size_of::<u32>() as u32,
+            )
+            .is_ok()
+            && allow != 0
+    }
+}
+
+fn swap_chain_flags(vsync: bool, tearing: bool) -> (DXGI_SWAP_CHAIN_FLAG, bool) {
+    if !vsync && tearing {
+        (DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING, true)
+    } else {
+        (DXGI_SWAP_CHAIN_FLAG(0), false)
+    }
+}
+
+fn present_params(vsync: bool, allow_tearing: bool) -> (u32, DXGI_PRESENT) {
+    if vsync {
+        (1, DXGI_PRESENT(0))
+    } else if allow_tearing {
+        (0, DXGI_PRESENT_ALLOW_TEARING)
+    } else {
+        (0, DXGI_PRESENT(0))
+    }
+}
 
 struct Presenter {
     swap_chain: IDXGISwapChain3,
     width: u32,
     height: u32,
     format: DXGI_FORMAT,
+    swap_flags: DXGI_SWAP_CHAIN_FLAG,
+    allow_tearing: bool,
     copy: HostList,
     /// With presents sent ahead ([`late_free_present`]): a list for each
     /// present in the air, and the submission it last flew as (it is used
@@ -9916,6 +9962,15 @@ mod present_status_tests {
         assert_eq!(meter.frames, 2);
         assert_eq!(meter.last_present, S_OK);
     }
+
+    #[test]
+    fn vsync_and_tearing_flags_match_configuration() {
+        assert_eq!(super::swap_chain_flags(false, true), (super::DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING, true));
+        assert_eq!(super::swap_chain_flags(true, true), (super::DXGI_SWAP_CHAIN_FLAG(0), false));
+        assert_eq!(super::present_params(false, true), (0, super::DXGI_PRESENT_ALLOW_TEARING));
+        assert_eq!(super::present_params(false, false), (0, super::DXGI_PRESENT(0)));
+        assert_eq!(super::present_params(true, true), (1, super::DXGI_PRESENT(0)));
+    }
 }
 
 impl Host {
@@ -9986,7 +10041,7 @@ impl Host {
             // SAFETY: no back buffer is held; every submission was waited for.
             let resized = unsafe {
                 p.swap_chain
-                    .ResizeBuffers(BUFFERS, width, height, format, DXGI_SWAP_CHAIN_FLAG(0))
+                    .ResizeBuffers(BUFFERS, width, height, format, p.swap_flags)
             };
             match resized {
                 Ok(()) => {
@@ -10201,7 +10256,13 @@ impl Host {
             #[cfg(feature = "diagnostics")]
             crate::replay::record::present(texture, state);
             let mut showing = crate::timeline::span("the host's Present");
-            let status = p.swap_chain.Present(0, DXGI_PRESENT(0));
+            let (sync, present_flags) = present_params(vsync_on(), p.allow_tearing);
+            let mut status = p.swap_chain.Present(sync, present_flags);
+            if p.allow_tearing && present_flags == DXGI_PRESENT_ALLOW_TEARING && status.is_err() {
+                p.allow_tearing = false;
+                tracing::info!(?status, "tearing present rejected; falling back to Present(0, 0)");
+                status = p.swap_chain.Present(0, DXGI_PRESENT(0));
+            }
             showing.next("the frame meter");
             if status == windows::Win32::Foundation::S_OK {
                 p.panel.frame(p.meter.line_due());
@@ -10230,6 +10291,8 @@ impl Host {
         // SAFETY: plain object creation for our window.
         unsafe {
             let factory: IDXGIFactory2 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0))?;
+            let vsync = vsync_on();
+            let (swap_flags, allow_tearing) = swap_chain_flags(vsync, tearing_supported(&factory));
             let desc = DXGI_SWAP_CHAIN_DESC1 {
                 Width: width,
                 Height: height,
@@ -10241,6 +10304,7 @@ impl Host {
                 BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
                 BufferCount: BUFFERS,
                 SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
+                Flags: swap_flags.0 as u32,
                 ..Default::default()
             };
             let swap_chain = factory
@@ -10248,7 +10312,7 @@ impl Host {
                 .cast::<IDXGISwapChain3>()?;
             let copy = self.new_list()?;
             copy.close();
-            tracing::info!(width, height, format = format.0, "presenting to a window");
+            tracing::info!(width, height, format = format.0, vsync, allow_tearing, buffers = BUFFERS, "presenting to a window");
             self.reserve_video_memory();
             self.log_video_memory("right after the swap chain is made");
             Ok(Presenter {
@@ -10256,6 +10320,8 @@ impl Host {
                 width,
                 height,
                 format,
+                swap_flags,
+                allow_tearing,
                 copy,
                 ahead: Vec::new(),
                 hwnd,

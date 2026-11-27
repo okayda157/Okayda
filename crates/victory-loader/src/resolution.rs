@@ -99,6 +99,16 @@ pub fn asked_upscaler() -> Option<u32> {
     kind
 }
 
+/// Guards against the shipping FSR4 shader table crash (`0xc0000094` at
+/// `+0x28f03e8` when `VICTORY_UPSCALER=7` runs with `VICTORY_OUTPUT != 1920x1080`).
+/// Set `VICTORY_ALLOW_UNSAFE_FSR=1` to bypass.
+pub fn safe_upscaler(output: Option<(u32, u32)>, asked: Option<u32>, allow_unsafe: bool) -> (Option<u32>, bool) {
+    if !allow_unsafe && asked == Some(7) && output.is_some_and(|s| s != (1920, 1080)) {
+        return (Some(6), true);
+    }
+    (asked, false)
+}
+
 /// A place to change: its offset in the image and the bytes there
 /// (compared first; the replacement is at most as long).
 pub struct Site {
@@ -298,7 +308,8 @@ pub unsafe fn write(base: usize, size: usize, site: &Site, code: &[u8]) -> Patch
 #[cfg(windows)]
 pub unsafe fn apply_asked(base: usize, size: usize) {
     let mut asked: Vec<(&Site, Vec<u8>, String)> = Vec::new();
-    if let Some((w, h)) = asked_output() {
+    let output = asked_output();
+    if let Some((w, h)) = output {
         asked.push((&OUTPUT, output_code(w, h), format!("{w}x{h}")));
         if (w, h) != (3840, 2160) {
             asked.push((&POOL_CHECK, pool_check_code(), format!("{w}x{h}")));
@@ -310,7 +321,13 @@ pub unsafe fn apply_asked(base: usize, size: usize) {
     if let Some(s) = asked_ffx_scale() {
         asked.push((&FFX_SCALE, ffx_scale_code(s), format!("{s}")));
     }
-    if let Some(kind) = asked_upscaler() {
+    let allow_unsafe_fsr = std::env::var("VICTORY_ALLOW_UNSAFE_FSR").is_ok_and(|v| v.trim() == "1");
+    let (upscaler, downgraded) = safe_upscaler(output, asked_upscaler(), allow_unsafe_fsr);
+    if downgraded {
+        tracing::warn!("VICTORY_UPSCALER=7 requires 1920x1080 in shipping FSR4 tables; falling back to upscaler 6 to avoid 0xc0000094");
+        eprintln!("VIctory: VICTORY_UPSCALER=7 requires 1920x1080; using upscaler 6 instead");
+    }
+    if let Some(kind) = upscaler {
         asked.push((&PICKER, picker_code(kind), format!("returns {kind}")));
     }
     for (site, code, value) in asked {
@@ -341,6 +358,9 @@ mod tests {
         assert_eq!(parse_render_scale("1"), Some(1.0));
         assert_eq!(parse_render_scale("0.4"), None);
         assert_eq!(parse_render_scale("1.5"), None);
+        assert_eq!(safe_upscaler(Some((1664, 936)), Some(7), false), (Some(6), true));
+        assert_eq!(safe_upscaler(Some((1664, 936)), Some(7), true), (Some(7), false));
+        assert_eq!(safe_upscaler(Some((1920, 1080)), Some(7), false), (Some(7), false));
     }
 
     /// The calls and loads in the bytes compared are the ones the

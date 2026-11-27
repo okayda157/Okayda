@@ -113,34 +113,34 @@ fn air() -> f32 {
 }
 
 /// Upper multiple of the diffuse estimate allowed from the title's own probe
-/// output (`VICTORY_AMBIENT_CAP`; default 3.5). Bounds broken indoor probe
-/// blocks while preserving local headlight and streetlamp indirect bounces.
+/// output (`VICTORY_AMBIENT_CAP`; default 6.0). Bounds broken indoor probe
+/// blocks while giving local headlights and streetlamps plenty of night headroom.
 fn cap() -> f32 {
     static SET: OnceLock<f32> = OnceLock::new();
     *SET.get_or_init(|| {
         let set = std::env::var("VICTORY_AMBIENT_CAP").unwrap_or_default();
-        set.trim().parse().ok().filter(|v: &f32| v.is_finite() && *v >= 1.0).unwrap_or(3.5)
+        set.trim().parse().ok().filter(|v: &f32| v.is_finite() && *v >= 1.0).unwrap_or(6.0)
     })
 }
 
 /// Share (0..=1) of the capped probe output blended above the smooth estimate
-/// (`VICTORY_AMBIENT_KEEP`; default 0.9).
+/// (`VICTORY_AMBIENT_KEEP`; default 0.95).
 fn keep_was() -> f32 {
     static SET: OnceLock<f32> = OnceLock::new();
     *SET.get_or_init(|| {
         let set = std::env::var("VICTORY_AMBIENT_KEEP").unwrap_or_default();
-        set.trim().parse().ok().filter(|v: &f32| v.is_finite() && (0.0..=1.0).contains(v)).unwrap_or(0.9)
+        set.trim().parse().ok().filter(|v: &f32| v.is_finite() && (0.0..=1.0).contains(v)).unwrap_or(0.95)
     })
 }
 
 /// Minimum low-light hemisphere ambient fill (`VICTORY_AMBIENT_FLOOR`; default
-/// 0.12, 0: off) so pitch-black rooms remain visible without washing out night
+/// 0.08, 0: off) so pitch-black rooms remain visible without washing out night
 /// exteriors or dimming local lights through auto-exposure.
 fn floor_level() -> f32 {
     static SET: OnceLock<f32> = OnceLock::new();
     *SET.get_or_init(|| {
         let set = std::env::var("VICTORY_AMBIENT_FLOOR").unwrap_or_default();
-        set.trim().parse().ok().filter(|v: &f32| v.is_finite() && *v >= 0.0).unwrap_or(0.12)
+        set.trim().parse().ok().filter(|v: &f32| v.is_finite() && *v >= 0.0).unwrap_or(0.08)
     })
 }
 
@@ -232,11 +232,11 @@ fn shade() -> [f32; 2] {
 
 const SOURCE: &str = r#"
 #define RS "RootConstants(num32BitConstants=17, b0), DescriptorTable(SRV(t0)), DescriptorTable(UAV(u0)), UAV(u1), UAV(u2), UAV(u3)"
-#define CX 64
-#define CY 36
+#define CX 48
+#define CY 28
 #define CELLS (CX * CY)
-#define PX 160
-#define PY 90
+#define PX 96
+#define PY 54
 cbuffer Set : register(b0) {
     float level; float constant; float strength; float radius;
     float near; float tan_y; uint width; uint height;
@@ -406,7 +406,7 @@ void raise(uint3 at : SV_DispatchThreadID) {
     float noise = frac(52.9829189 * frac(dot(float2(p), float2(0.06711056, 0.00583715))));
     if (strength > 0.0 && px >= 1.5 && c.z < 400.0) {
         float sum = 0.0;
-        const int N = 12;
+        const int N = 8;
         for (int i = 0; i < N; i++) {
             float a = i * 2.399963 + noise * 6.2831853;
             float2 o = float2(cos(a), sin(a)) * (sqrt((i + 0.5) / N) * px);
@@ -459,7 +459,7 @@ void raise(uint3 at : SV_DispatchThreadID) {
     // Keep the title's own local lamp and headlight indirect bounce up to
     // `bound`, rather than discarding pixels where local light exceeds `found`.
     float bound = fresh > 0.0 ? lerp(1.0, most, saturate(cells[CELLS].a / fresh)) : most;
-    float top = max(dot(found, LUMA), 0.16) * bound;
+    float top = max(dot(found, LUMA), 0.40) * bound;
     float has = dot(was, LUMA);
     was *= min(1.0, top / max(has, 1e-6));
     float3 written = lerp(found, max(was, found), keep_was);
@@ -476,9 +476,9 @@ void raise(uint3 at : SV_DispatchThreadID) {
 "#;
 
 /// Bytes of the cells' buffer and of the points'.
-const CELLS: u64 = 64 * 36;
+const CELLS: u64 = 48 * 28;
 const CELL_BYTES: u64 = (2 * CELLS + 1) * 16;
-const POINT_BYTES: u64 = 160 * 90 * 48;
+const POINT_BYTES: u64 = 96 * 54 * 48;
 /// Where the slow mean is among the cells (float4s).
 pub(crate) const CELLS_AT: u32 = CELLS as u32;
 
@@ -645,15 +645,15 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
         };
         match role {
             Role::Radiance => {
-                run(&pass.keep, 8, 9, 1);
+                run(&pass.keep, 6, 7, 1);
                 run(&pass.mean, 1, 1, 1);
                 KEPT.store(true, Ordering::Relaxed);
             }
             Role::Air => run(&pass.air, views.size[0].div_ceil(8), views.size[1].div_ceil(8), views.slices.div_ceil(2)),
             Role::Resolve => {
                 if constant == 0.0 {
-                    run(&pass.place, 8, 9, 1);
-                    run(&pass.gather, 20, 45, 1);
+                    run(&pass.place, 6, 7, 1);
+                    run(&pass.gather, 12, 27, 1);
                 }
                 run(&pass.raise, views.size[0].div_ceil(8), views.size[1].div_ceil(8), 1);
             }

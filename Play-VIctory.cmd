@@ -89,7 +89,8 @@ if not defined VICTORY_CARD_REHASH_RUNS set "VICTORY_CARD_REHASH_RUNS=1"
 if not defined VICTORY_JOIN_COPIES set "VICTORY_JOIN_COPIES=1"
 if not defined VICTORY_INDIRECT_WINDOW set "VICTORY_INDIRECT_WINDOW=1"
 if not defined VICTORY_RELAY_COPY set "VICTORY_RELAY_COPY=1"
-if not defined VICTORY_CARD_STEPS set "VICTORY_CARD_STEPS=1"
+if not defined VICTORY_CARD_STEPS set "VICTORY_CARD_STEPS=2"
+if not defined VICTORY_SUBMIT_FRAMES set "VICTORY_SUBMIT_FRAMES=2"
 if not defined VICTORY_INDIRECT_BATCH set "VICTORY_INDIRECT_BATCH=2"
 if not defined VICTORY_MAP_THREADS set "VICTORY_MAP_THREADS=1"
 if not defined VICTORY_TITLE_PRIORITIES set "VICTORY_TITLE_PRIORITIES=1"
@@ -103,9 +104,9 @@ if not defined VICTORY_UPLOAD_AHEAD set "VICTORY_UPLOAD_AHEAD=1"
 if not defined VICTORY_AMBIENT set "VICTORY_AMBIENT=1.0"
 if not defined VICTORY_AMBIENT_SHADE set "VICTORY_AMBIENT_SHADE=0.4,0.45"
 if not defined VICTORY_AMBIENT_AIR set "VICTORY_AMBIENT_AIR=0"
-if not defined VICTORY_AMBIENT_CAP set "VICTORY_AMBIENT_CAP=3.5"
-if not defined VICTORY_AMBIENT_KEEP set "VICTORY_AMBIENT_KEEP=0.9"
-if not defined VICTORY_AMBIENT_FLOOR set "VICTORY_AMBIENT_FLOOR=0.12"
+if not defined VICTORY_AMBIENT_CAP set "VICTORY_AMBIENT_CAP=6.0"
+if not defined VICTORY_AMBIENT_KEEP set "VICTORY_AMBIENT_KEEP=0.95"
+if not defined VICTORY_AMBIENT_FLOOR set "VICTORY_AMBIENT_FLOOR=0.08"
 if not defined VICTORY_AMBIENT_SETTLE set "VICTORY_AMBIENT_SETTLE=250,3,2.0"
 
 :: Renderer ports da build AMD (em "safe", desliga os 4 experimentais mantendo CBV + VRAM)
@@ -118,17 +119,20 @@ if /i "%mode%"=="safe" (
   if not defined VICTORY_PORT_GUARD set "VICTORY_PORT_GUARD=1"
   if not defined VICTORY_PORT_JOURNAL set "VICTORY_PORT_JOURNAL=1"
 )
-:: Saida 936p Series S com AMD FidelityFX FSR nativo (render interno 2/3 -> 1664x936 nitido e alto FPS)
-if not defined VICTORY_OUTPUT set "VICTORY_OUTPUT=1664x936"
-if not defined VICTORY_UPSCALER set "VICTORY_UPSCALER=7"
-if not defined VICTORY_TITLE_FPS set "VICTORY_TITLE_FPS=60"
+:: Saida 1080p estavel em Series X (evita crash FSR4 0xc0000094 e OOM Series S), sem VSync e sem trava de FPS
+if not defined VICTORY_OUTPUT set "VICTORY_OUTPUT=1920x1080"
+if not defined VICTORY_DISPLAY_MODE set "VICTORY_DISPLAY_MODE=1920x1080"
+if not defined VICTORY_DISPLAY_HZ set "VICTORY_DISPLAY_HZ=120"
+if not defined VICTORY_UPSCALER set "VICTORY_UPSCALER=6"
+if not defined VICTORY_VSYNC set "VICTORY_VSYNC=0"
+if not defined VICTORY_TITLE_FPS set "VICTORY_TITLE_FPS=0"
 if not defined VICTORY_FRAME_INTERVAL_MS set "VICTORY_FRAME_INTERVAL_MS=0"
 if /i "%mode%"=="diag" if not defined VICTORY_D3D12_DRED set "VICTORY_D3D12_DRED=light"
 
 :: Logs direcionados para pasta logs\ sem flood per-draw nem 120k WARNs de port_descriptors
 if not defined VICTORY_LOG if not defined RUST_LOG set "VICTORY_LOG=warn,victory_gpu::port_descriptors=error,victory_gpu::host=info,victory_gpu::queue=info,victory_gpu::shadow=info,victory_gpu::pipeline=info,victory_gpu::texture=info,victory_gpu::resource=info,victory_gpu::ambient=info"
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Run-WithErrorLog.ps1" -Runner "%runner%" -GameExe "%VICTORY_GAME_DIR%\game_scarlett_master.exe" -Console "series-s" -Mode "%mode%"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Run-WithErrorLog.ps1" -Runner "%runner%" -GameExe "%VICTORY_GAME_DIR%\game_scarlett_master.exe" -Console "series-x" -Mode "%mode%"
 set "rc=%errorlevel%"
 if %rc% neq 0 pause
 exit /b %rc%

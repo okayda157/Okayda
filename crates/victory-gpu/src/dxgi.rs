@@ -248,10 +248,20 @@ fn display_size() -> (u32, u32) {
     })
 }
 
-/// The console's mode list: one 4K mode at 60 Hz (the title looks
-/// for a 120 Hz one to allow 120 Hz frame intervals).
-/// shortcut: fixed mode, not the host display's; report the host's rates if
-/// a title paces by them.
+/// Refresh rate reported in the console's DXGI mode list (`VICTORY_DISPLAY_HZ`;
+/// default `120` so titles allow intervals below `16667 us` when unlocked).
+fn display_refresh() -> u32 {
+    static HZ: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *HZ.get_or_init(|| {
+        std::env::var("VICTORY_DISPLAY_HZ")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .filter(|&hz| (30..=240).contains(&hz))
+            .unwrap_or(120)
+    })
+}
+
+/// The console's mode list: one mode at `display_size()` and `display_refresh()`.
 extern "system" fn modes(
     _: This,
     _format: u32,
@@ -275,7 +285,7 @@ extern "system" fn modes(
     let mode = Mode {
         width,
         height,
-        refresh: [60, 1],
+        refresh: [display_refresh(), 1],
         format: 0,
         scanlines: 1, // progressive
         scaling: 0,
@@ -344,6 +354,16 @@ mod tests {
         let outputs = slot::<Indexed>(adapter, 0x38);
         assert_eq!(outputs(adapter, 0, &mut output), S_OK);
         assert!(!output.is_null());
+
+        type Modes = extern "system" fn(This, u32, u32, *mut u32, *mut Mode) -> HRESULT;
+        let get_modes = slot::<Modes>(output, 0xa8);
+        let mut count = 1u32;
+        let mut mode = std::mem::MaybeUninit::<Mode>::uninit();
+        assert_eq!(get_modes(output, 0, 0, &mut count, mode.as_mut_ptr()), S_OK);
+        assert_eq!(count, 1);
+        // SAFETY: initialized above.
+        assert_eq!(unsafe { mode.assume_init() }.refresh, [display_refresh(), 1]);
+
         assert_eq!(outputs(adapter, 1, &mut output), NOT_FOUND);
     }
 
