@@ -113,33 +113,33 @@ fn air() -> f32 {
 }
 
 /// Upper multiple of the diffuse estimate allowed from the title's own probe
-/// output (`VICTORY_AMBIENT_CAP`; default 1.55). Lowering this keeps broken
+/// output (`VICTORY_AMBIENT_CAP`; default 2.8). Lowering this keeps broken
 /// indoor probe blocks from glowing bright white next to dark walls.
 fn cap() -> f32 {
     static SET: OnceLock<f32> = OnceLock::new();
     *SET.get_or_init(|| {
         let set = std::env::var("VICTORY_AMBIENT_CAP").unwrap_or_default();
-        set.trim().parse().ok().filter(|v: &f32| v.is_finite() && *v >= 1.0).unwrap_or(1.55)
+        set.trim().parse().ok().filter(|v: &f32| v.is_finite() && *v >= 1.0).unwrap_or(2.8)
     })
 }
 
 /// Share (0..=1) of the capped probe output blended above the smooth estimate
-/// (`VICTORY_AMBIENT_KEEP`; default 0.55).
+/// (`VICTORY_AMBIENT_KEEP`; default 0.65).
 fn keep_was() -> f32 {
     static SET: OnceLock<f32> = OnceLock::new();
     *SET.get_or_init(|| {
         let set = std::env::var("VICTORY_AMBIENT_KEEP").unwrap_or_default();
-        set.trim().parse().ok().filter(|v: &f32| v.is_finite() && (0.0..=1.0).contains(v)).unwrap_or(0.55)
+        set.trim().parse().ok().filter(|v: &f32| v.is_finite() && (0.0..=1.0).contains(v)).unwrap_or(0.65)
     })
 }
 
 /// Minimum low-light hemisphere ambient fill (`VICTORY_AMBIENT_FLOOR`; default
-/// 0.045, 0: off) so night exteriors and dark interiors do not crush to black.
+/// 0.35, 0: off) so night exteriors and dark interiors do not crush to black.
 fn floor_level() -> f32 {
     static SET: OnceLock<f32> = OnceLock::new();
     *SET.get_or_init(|| {
         let set = std::env::var("VICTORY_AMBIENT_FLOOR").unwrap_or_default();
-        set.trim().parse().ok().filter(|v: &f32| v.is_finite() && *v >= 0.0).unwrap_or(0.045)
+        set.trim().parse().ok().filter(|v: &f32| v.is_finite() && *v >= 0.0).unwrap_or(0.35)
     })
 }
 
@@ -275,7 +275,7 @@ void keep(uint3 at : SV_DispatchThreadID) {
         float3 c = max(radiance[p], 0.0);
         c = any(isnan(c)) || any(isinf(c)) ? 0.0 : c;
         // Lamps and glints count, but not for everything.
-        sum += c / max(1.0, dot(c, LUMA) / 20.0);
+        sum += c / max(1.0, dot(c, LUMA) / 36.0);
     }
     cells[at.y * CX + at.x] = float4(sum / 25.0, 1.0);
 }
@@ -283,9 +283,19 @@ void keep(uint3 at : SV_DispatchThreadID) {
 [numthreads(1, 1, 1)]
 void mean() {
     float3 sum = 0;
-    for (uint i = 0; i < CELLS; i++) sum += cells[i].rgb;
+    float3 lit_sum = 0;
+    float lit_w = 0;
+    for (uint i = 0; i < CELLS; i++) {
+        float3 c = cells[i].rgb;
+        float w = saturate(dot(c, LUMA) * 24.0);
+        sum += c;
+        lit_sum += c * w;
+        lit_w += w;
+    }
     float4 was = cells[CELLS];
-    float3 now = sum / CELLS;
+    float3 flat_mean = sum / CELLS;
+    float3 lit_mean = lit_sum / max(lit_w, 1.0);
+    float3 now = lerp(flat_mean, lit_mean, 0.80);
     // (`jump` > 0: a change of more than that factor either way is
     // followed at once, as a new room is.)
     float a = max(dot(now, LUMA), 1e-5), b = max(dot(was.rgb, LUMA), 1e-5);
@@ -404,7 +414,7 @@ void raise(uint3 at : SV_DispatchThreadID) {
             float over = dot(v, n) - 0.010 * c.z - 0.015;
             sum += max(over, 0.0) / sqrt(vv + 1e-6) * saturate(1.0 - vv / (radius * radius));
         }
-        open = lerp(0.52, 1.0, saturate(1.0 - strength * 1.15 * sum / N));
+        open = lerp(0.64, 1.0, saturate(1.0 - strength * 1.15 * sum / N));
     }
     float3 found;
     if (constant > 0.0) {
@@ -434,12 +444,12 @@ void raise(uint3 at : SV_DispatchThreadID) {
     found = all + 0.85 * float3(dot(sr.xyz, n), dot(sg.xyz, n), dot(sb.xyz, n)) / sum;
     found = clamp(found, 0.35 * all, 2.0 * all);
     float hemi = 0.82 + 0.18 * clamp(n.y, -1.0, 1.0);
-    found = lerp(found, cells[CELLS].rgb, 0.40) * level * open;
-    float3 bounce_floor = cells[CELLS].rgb * (0.28 * level * hemi * open);
+    found = lerp(found, cells[CELLS].rgb, 0.45) * level * open;
+    float3 bounce_floor = cells[CELLS].rgb * (0.42 * level * hemi * open);
     found = max(found, bounce_floor);
     if (ambient_floor > 0.0) {
-        float3 floor_light = float3(0.92, 0.95, 1.0) * (ambient_floor * level * hemi * open);
-        found += floor_light / (1.0 + dot(found, LUMA) * 5.0);
+        float3 floor_light = float3(0.96, 0.98, 1.0) * (ambient_floor * level * hemi * open);
+        found += floor_light / (1.0 + dot(found, LUMA) * 1.1);
     }
     float3 was = unpack(light[p]);
     // Filter magenta garbage probes left by uninitialized/corrupted memory on AMD.
@@ -451,7 +461,7 @@ void raise(uint3 at : SV_DispatchThreadID) {
     float bound = fresh > 0.0 ? lerp(1.0, most, saturate(cells[CELLS].a / fresh)) : most;
     float top = max(dot(found, LUMA) * bound, 1e-6);
     float has = dot(was, LUMA);
-    float trust = keep_was * saturate(2.5 - has / top);
+    float trust = keep_was * saturate(3.2 - has / top);
     was *= min(1.0, top / max(has, 1e-6));
     float3 written = lerp(found, max(was, found), trust);
     light[p] = pack(written);

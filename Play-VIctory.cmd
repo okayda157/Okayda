@@ -43,38 +43,38 @@ if not defined VICTORY_CACHE_DIR set "VICTORY_CACHE_DIR=%LOCALAPPDATA%\VIctory\c
 if not defined VICTORY_PANEL set "VICTORY_PANEL=1"
 if not defined VICTORY_PIPELINE_BOOK set "VICTORY_PIPELINE_BOOK=1"
 
-:: Dedicacao maxima segura na RX 6600 (8 GB GDDR6) mantendo margem anti-spill e RAM enxuta em 16 GB PC
-if not defined VICTORY_MEMORY_CARD_MB set "VICTORY_MEMORY_CARD_MB=2048"
-if not defined VICTORY_VRAM_RESERVE_MB set "VICTORY_VRAM_RESERVE_MB=1024"
+:: Dedicacao equilibrada na RX 6600 (8 GB GDDR6): preserva texturas visitadas na VRAM sem saturar barramento/relay
+if not defined VICTORY_MEMORY_CARD_MB set "VICTORY_MEMORY_CARD_MB=1536"
+if not defined VICTORY_VRAM_RESERVE_MB set "VICTORY_VRAM_RESERVE_MB=768"
 if not defined VICTORY_CARD_BUFFERS set "VICTORY_CARD_BUFFERS=1"
-if not defined VICTORY_CARD_BUFFERS_MIN_KB set "VICTORY_CARD_BUFFERS_MIN_KB=128"
-if not defined VICTORY_CARD_BUFFERS_MB set "VICTORY_CARD_BUFFERS_MB=1024"
+if not defined VICTORY_CARD_BUFFERS_MIN_KB set "VICTORY_CARD_BUFFERS_MIN_KB=1024"
+if not defined VICTORY_CARD_BUFFERS_MB set "VICTORY_CARD_BUFFERS_MB=512"
 if not defined VICTORY_CARD_WINDOWS_MB set "VICTORY_CARD_WINDOWS_MB=0"
 if not defined VICTORY_WINDOW_BUDGET_MB set "VICTORY_WINDOW_BUDGET_MB=1024"
 if not defined VICTORY_CARD_ROOM_FOR_BUFFERS set "VICTORY_CARD_ROOM_FOR_BUFFERS=1"
-if not defined VICTORY_CARD_ROOM_FOR_TARGETS_MB set "VICTORY_CARD_ROOM_FOR_TARGETS_MB=1536"
-if not defined VICTORY_TEXTURE_ROOM_PERCENT set "VICTORY_TEXTURE_ROOM_PERCENT=94"
-if not defined VICTORY_VRAM_TARGET_PERCENT set "VICTORY_VRAM_TARGET_PERCENT=88"
-if not defined VICTORY_VRAM_EVICT_PERCENT set "VICTORY_VRAM_EVICT_PERCENT=92"
-if not defined VICTORY_POOL_KEEP_PERCENT set "VICTORY_POOL_KEEP_PERCENT=85"
+if not defined VICTORY_CARD_ROOM_FOR_TARGETS_MB set "VICTORY_CARD_ROOM_FOR_TARGETS_MB=1024"
+if not defined VICTORY_TEXTURE_ROOM_PERCENT set "VICTORY_TEXTURE_ROOM_PERCENT=96"
+if not defined VICTORY_VRAM_TARGET_PERCENT set "VICTORY_VRAM_TARGET_PERCENT=93"
+if not defined VICTORY_VRAM_EVICT_PERCENT set "VICTORY_VRAM_EVICT_PERCENT=97"
+if not defined VICTORY_POOL_KEEP_PERCENT set "VICTORY_POOL_KEEP_PERCENT=92"
 if not defined VICTORY_POOL_SPARES_MAX set "VICTORY_POOL_SPARES_MAX=6"
-if not defined VICTORY_STAGING_KEPT set "VICTORY_STAGING_KEPT=2"
+if not defined VICTORY_STAGING_KEPT set "VICTORY_STAGING_KEPT=4"
 if not defined VICTORY_SCRATCH_KEPT_MB set "VICTORY_SCRATCH_KEPT_MB=64"
 if not defined VICTORY_SNAPSHOT_POOL_MB set "VICTORY_SNAPSHOT_POOL_MB=96"
 if not defined VICTORY_LIST_POOL_MAX set "VICTORY_LIST_POOL_MAX=96"
 if not defined VICTORY_BURY_LAG set "VICTORY_BURY_LAG=12"
-if not defined VICTORY_RIPE_BLOCKS set "VICTORY_RIPE_BLOCKS=4"
+if not defined VICTORY_RIPE_BLOCKS set "VICTORY_RIPE_BLOCKS=8"
 
-:: Streaming rapido de texturas sem estrangular threads no Xeon 10c/20t (evita CPU 98% e filas de 17k texturas)
+:: Streaming rapido de texturas com folga para audio/streaming no Xeon 10c/20t
 if not defined VICTORY_RESIDENCY set "VICTORY_RESIDENCY=0"
 if not defined VICTORY_TEXTURE_CATCHUP set "VICTORY_TEXTURE_CATCHUP=1"
-if not defined VICTORY_TEXTURE_STAGE_MB set "VICTORY_TEXTURE_STAGE_MB=512"
-if not defined VICTORY_EARLY_TEXTURES_MS set "VICTORY_EARLY_TEXTURES_MS=24"
+if not defined VICTORY_TEXTURE_STAGE_MB set "VICTORY_TEXTURE_STAGE_MB=640"
+if not defined VICTORY_EARLY_TEXTURES_MS set "VICTORY_EARLY_TEXTURES_MS=32"
 if not defined VICTORY_TEXTURE_LOOK_MS set "VICTORY_TEXTURE_LOOK_MS=400"
-if not defined VICTORY_PIPELINE_WORKERS set "VICTORY_PIPELINE_WORKERS=4"
-if not defined VICTORY_THIN_THREADS set "VICTORY_THIN_THREADS=6"
-if not defined VICTORY_UNDER_THREADS set "VICTORY_UNDER_THREADS=6"
-if not defined VICTORY_VIEW_THREADS set "VICTORY_VIEW_THREADS=5"
+if not defined VICTORY_PIPELINE_WORKERS set "VICTORY_PIPELINE_WORKERS=3"
+if not defined VICTORY_THIN_THREADS set "VICTORY_THIN_THREADS=4"
+if not defined VICTORY_UNDER_THREADS set "VICTORY_UNDER_THREADS=4"
+if not defined VICTORY_VIEW_THREADS set "VICTORY_VIEW_THREADS=4"
 if not defined VICTORY_LAND_THREADS set "VICTORY_LAND_THREADS=4"
 if not defined VICTORY_LAND_SKIP set "VICTORY_LAND_SKIP=1"
 if not defined VICTORY_FAST_CORES set "VICTORY_FAST_CORES=0"
@@ -92,20 +92,20 @@ if not defined VICTORY_RELAY_COPY set "VICTORY_RELAY_COPY=1"
 if not defined VICTORY_CARD_STEPS set "VICTORY_CARD_STEPS=1"
 if not defined VICTORY_INDIRECT_BATCH set "VICTORY_INDIRECT_BATCH=2"
 if not defined VICTORY_MAP_THREADS set "VICTORY_MAP_THREADS=1"
-if not defined VICTORY_TITLE_PRIORITIES set "VICTORY_TITLE_PRIORITIES=0"
+if not defined VICTORY_TITLE_PRIORITIES set "VICTORY_TITLE_PRIORITIES=1"
 if not defined VICTORY_CARD_AWAKE set "VICTORY_CARD_AWAKE=1"
 if not defined VICTORY_SHOW_AFTER set "VICTORY_SHOW_AFTER=1"
 if not defined VICTORY_THIN set "VICTORY_THIN=1"
 if not defined VICTORY_JOIN_PARTS set "VICTORY_JOIN_PARTS=8"
 if not defined VICTORY_UPLOAD_AHEAD set "VICTORY_UPLOAD_AHEAD=1"
 
-:: Iluminacao ambiente + sombras limpas (remove manchas brancas, patios escuros ao ar livre e cenas noturnas pretas)
-if not defined VICTORY_AMBIENT set "VICTORY_AMBIENT=1.15"
-if not defined VICTORY_AMBIENT_SHADE set "VICTORY_AMBIENT_SHADE=0.45,0.45"
-if not defined VICTORY_AMBIENT_AIR set "VICTORY_AMBIENT_AIR=1.2"
-if not defined VICTORY_AMBIENT_CAP set "VICTORY_AMBIENT_CAP=1.55"
-if not defined VICTORY_AMBIENT_KEEP set "VICTORY_AMBIENT_KEEP=0.55"
-if not defined VICTORY_AMBIENT_FLOOR set "VICTORY_AMBIENT_FLOOR=0.055"
+:: Iluminacao ambiente + sombras limpas (forca luz em salas sem lampada e casas na sombra sem estourar)
+if not defined VICTORY_AMBIENT set "VICTORY_AMBIENT=1.35"
+if not defined VICTORY_AMBIENT_SHADE set "VICTORY_AMBIENT_SHADE=0.35,0.45"
+if not defined VICTORY_AMBIENT_AIR set "VICTORY_AMBIENT_AIR=0.7"
+if not defined VICTORY_AMBIENT_CAP set "VICTORY_AMBIENT_CAP=2.8"
+if not defined VICTORY_AMBIENT_KEEP set "VICTORY_AMBIENT_KEEP=0.65"
+if not defined VICTORY_AMBIENT_FLOOR set "VICTORY_AMBIENT_FLOOR=0.45"
 if not defined VICTORY_AMBIENT_SETTLE set "VICTORY_AMBIENT_SETTLE=250,3,2.0"
 
 :: Renderer ports da build AMD (em "safe", desliga os 4 experimentais mantendo CBV + VRAM)
@@ -118,8 +118,8 @@ if /i "%mode%"=="safe" (
   if not defined VICTORY_PORT_GUARD set "VICTORY_PORT_GUARD=1"
   if not defined VICTORY_PORT_JOURNAL set "VICTORY_PORT_JOURNAL=1"
 )
-:: Saida 1080p nitida com upscaler nativo (1280x720 interno -> 1920x1080 final e HUD 1080p)
-if not defined VICTORY_OUTPUT set "VICTORY_OUTPUT=1920x1080"
+:: Saida 4K fixa com upscaler nativo (2560x1440 interno -> 3840x2160 final e HUD 4K)
+if not defined VICTORY_OUTPUT set "VICTORY_OUTPUT=3840x2160"
 if not defined VICTORY_UPSCALER set "VICTORY_UPSCALER=6"
 if not defined VICTORY_RENDER_SCALE set "VICTORY_RENDER_SCALE=0.67"
 if not defined VICTORY_FRAME_INTERVAL_MS set "VICTORY_FRAME_INTERVAL_MS=16.667"
@@ -128,7 +128,7 @@ if /i "%mode%"=="diag" if not defined VICTORY_D3D12_DRED set "VICTORY_D3D12_DRED
 :: Logs direcionados para pasta logs\ sem flood per-draw nem 120k WARNs de port_descriptors
 if not defined VICTORY_LOG if not defined RUST_LOG set "VICTORY_LOG=warn,victory_gpu::port_descriptors=error,victory_gpu::host=info,victory_gpu::queue=info,victory_gpu::shadow=info,victory_gpu::pipeline=info,victory_gpu::texture=info,victory_gpu::resource=info,victory_gpu::ambient=info"
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Run-WithErrorLog.ps1" -Runner "%runner%" -GameExe "%VICTORY_GAME_DIR%\game_scarlett_master.exe" -Console "series-s" -Mode "%mode%"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Run-WithErrorLog.ps1" -Runner "%runner%" -GameExe "%VICTORY_GAME_DIR%\game_scarlett_master.exe" -Console "series-x" -Mode "%mode%"
 set "rc=%errorlevel%"
 if %rc% neq 0 pause
 exit /b %rc%

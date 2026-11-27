@@ -5,8 +5,8 @@
 //! (unless `VICTORY_LATE_WAIT=1`, see [`late`]);
 //! overlap them with per-submission fences once more than clears run.
 
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Condvar, Mutex, OnceLock};
 
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_12_0;
@@ -184,8 +184,8 @@ pub(crate) fn vram_keep_configured(budget: u64, used: u64) -> (u64, u64) {
 
 fn vram_keep_with_thresholds(budget: u64, used: u64, target_pct: u64, evict_pct: u64) -> (u64, u64) {
     const KEPT_MS: u64 = 600_000;
-    const IDLE_MS: u64 = 5_000;
-    const SHORT_MS: u64 = 3_000;
+    const IDLE_MS: u64 = 45_000;
+    const SHORT_MS: u64 = 15_000;
     if budget == 0 {
         return (IDLE_MS, u64::MAX);
     }
@@ -193,9 +193,9 @@ fn vram_keep_with_thresholds(budget: u64, used: u64, target_pct: u64, evict_pct:
     if used < share(target_pct) {
         (KEPT_MS, u64::MAX)
     } else if used < share(evict_pct) {
-        (IDLE_MS, used - share(target_pct.saturating_sub(5)))
+        (IDLE_MS, used - share(target_pct.saturating_sub(2)))
     } else {
-        (SHORT_MS, used - share(evict_pct.saturating_sub(9).max(target_pct.saturating_sub(3))))
+        (SHORT_MS, used - share(evict_pct.saturating_sub(4).max(target_pct.saturating_sub(1))))
     }
 }
 
@@ -215,10 +215,10 @@ pub(crate) fn vram_idle_ms(video_memory: Option<[u64; 4]>) -> u64 {
 
 fn vram_idle_for(video_memory: Option<[u64; 4]>, keep: bool) -> u64 {
     const KEPT_MS: u64 = 600_000;
-    const LONG_MS: u64 = 30_000;
-    const NORMAL_MS: u64 = 5_000;
-    const MODERATE_MS: u64 = 2_500;
-    const HIGH_MS: u64 = 1_000;
+    const LONG_MS: u64 = 60_000;
+    const NORMAL_MS: u64 = 20_000;
+    const MODERATE_MS: u64 = 10_000;
+    const HIGH_MS: u64 = 4_000;
     static THRESHOLDS: OnceLock<(u128, u128)> = OnceLock::new();
     let (target_pct, evict_pct) = *THRESHOLDS.get_or_init(|| {
         let parse = |key: &str| {
@@ -281,72 +281,112 @@ struct Aside {
     _keep: (ID3D12CommandAllocator, [ID3D12Resource; 2]),
 }
 // SAFETY: D3D12 objects are free-threaded, the event is waited on by one
-// thread at a time (the lock).
+// thread at a time (guarded by `AsideState::inflight`).
 unsafe impl Send for Aside {}
+
+struct AsideState {
+    aside: Option<Aside>,
+    inflight: bool,
+}
+
+static MAPPED_NEEDED: AtomicU64 = AtomicU64::new(0);
+static MAPPED_DONE: AtomicU64 = AtomicU64::new(0);
 
 /// New memory of the card is mapped into its address space when this
 /// returns: a copy of a few bytes is sent to a queue of ours after the
 /// memory was made, which the system starts only when all mappings asked
-/// for so far are done, and waited for. (`MakeResident` came back before
-/// that: run n11 was lost as n08 was with it alone.) Best done off a hot
-/// path: a tenth of a millisecond to some.
+/// for so far are done, and waited for. Concurrent callers coalesce onto
+/// one copy-queue fence instead of serializing every resource behind a
+/// separate GPU signal and wait.
 pub(crate) fn mapped(device: &ID3D12Device) -> windows::core::Result<()> {
-    static ASIDE: Mutex<Option<Aside>> = Mutex::new(None);
+    static ASIDE: Mutex<AsideState> = Mutex::new(AsideState { aside: None, inflight: false });
+    static DONE_WAIT: Condvar = Condvar::new();
     if !wait_resident() {
         return Ok(());
     }
     let started = std::time::Instant::now();
-    let mut aside = ASIDE.lock().unwrap_or_else(|e| e.into_inner());
-    // SAFETY: plain object creation; the objects the list names are kept.
-    unsafe {
-        if aside.is_none() {
-            let buffer = |kind: D3D12_HEAP_TYPE, state: D3D12_RESOURCE_STATES| -> windows::core::Result<ID3D12Resource> {
-                let mut made: Option<ID3D12Resource> = None;
-                device.CreateCommittedResource(
-                    &D3D12_HEAP_PROPERTIES { Type: kind, ..Default::default() },
-                    D3D12_HEAP_FLAG_NONE,
-                    &D3D12_RESOURCE_DESC {
-                        Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
-                        Width: 256,
-                        Height: 1,
-                        DepthOrArraySize: 1,
-                        MipLevels: 1,
-                        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-                        Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+    let ticket = MAPPED_NEEDED.fetch_add(1, Ordering::AcqRel) + 1;
+    if MAPPED_DONE.load(Ordering::Acquire) < ticket {
+        let mut guard = ASIDE.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if MAPPED_DONE.load(Ordering::Acquire) >= ticket {
+                break;
+            }
+            if guard.inflight {
+                guard = DONE_WAIT.wait(guard).unwrap_or_else(|e| e.into_inner());
+                continue;
+            }
+            let batch_gen = MAPPED_NEEDED.load(Ordering::Acquire);
+            // SAFETY: plain object creation; objects live in `Aside`.
+            let wait_info = unsafe {
+                if guard.aside.is_none() {
+                    let buffer = |kind: D3D12_HEAP_TYPE, state: D3D12_RESOURCE_STATES| -> windows::core::Result<ID3D12Resource> {
+                        let mut made: Option<ID3D12Resource> = None;
+                        device.CreateCommittedResource(
+                            &D3D12_HEAP_PROPERTIES { Type: kind, ..Default::default() },
+                            D3D12_HEAP_FLAG_NONE,
+                            &D3D12_RESOURCE_DESC {
+                                Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+                                Width: 256,
+                                Height: 1,
+                                DepthOrArraySize: 1,
+                                MipLevels: 1,
+                                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                                Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+                                ..Default::default()
+                            },
+                            state,
+                            None,
+                            &mut made,
+                        )?;
+                        made.ok_or_else(windows::core::Error::empty)
+                    };
+                    let from = buffer(D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ)?;
+                    let to = buffer(D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST)?;
+                    let queue: ID3D12CommandQueue = device.CreateCommandQueue(&D3D12_COMMAND_QUEUE_DESC {
+                        Type: D3D12_COMMAND_LIST_TYPE_COPY,
                         ..Default::default()
-                    },
-                    state,
-                    None,
-                    &mut made,
-                )?;
-                made.ok_or_else(windows::core::Error::empty)
+                    })?;
+                    let allocator: ID3D12CommandAllocator = device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COPY)?;
+                    let list: ID3D12GraphicsCommandList = device.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COPY, &allocator, None)?;
+                    list.CopyBufferRegion(&to, 0, &from, 0, 16);
+                    list.Close()?;
+                    guard.aside = Some(Aside {
+                        queue,
+                        list: list.cast()?,
+                        fence: device.CreateFence(0, D3D12_FENCE_FLAG_NONE)?,
+                        event: CreateEventW(None, false, false, None)?,
+                        value: 0,
+                        _keep: (allocator, [from, to]),
+                    });
+                }
+                let Some(a) = guard.aside.as_mut() else {
+                    return Ok(());
+                };
+                a.queue.ExecuteCommandLists(&[Some(a.list.clone())]);
+                a.value += 1;
+                a.queue.Signal(&a.fence, a.value)?;
+                if a.fence.GetCompletedValue() < a.value {
+                    a.fence.SetEventOnCompletion(a.value, a.event)?;
+                    Some(a.event.0 as usize)
+                } else {
+                    None
+                }
             };
-            let from = buffer(D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ)?;
-            let to = buffer(D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST)?;
-            let queue: ID3D12CommandQueue = device.CreateCommandQueue(&D3D12_COMMAND_QUEUE_DESC {
-                Type: D3D12_COMMAND_LIST_TYPE_COPY,
-                ..Default::default()
-            })?;
-            let allocator: ID3D12CommandAllocator = device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COPY)?;
-            let list: ID3D12GraphicsCommandList = device.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COPY, &allocator, None)?;
-            list.CopyBufferRegion(&to, 0, &from, 0, 16);
-            list.Close()?;
-            *aside = Some(Aside {
-                queue,
-                list: list.cast()?,
-                fence: device.CreateFence(0, D3D12_FENCE_FLAG_NONE)?,
-                event: CreateEventW(None, false, false, None)?,
-                value: 0,
-                _keep: (allocator, [from, to]),
-            });
-        }
-        let Some(a) = aside.as_mut() else { return Ok(()) };
-        a.queue.ExecuteCommandLists(&[Some(a.list.clone())]);
-        a.value += 1;
-        a.queue.Signal(&a.fence, a.value)?;
-        if a.fence.GetCompletedValue() < a.value {
-            a.fence.SetEventOnCompletion(a.value, a.event)?;
-            WaitForSingleObject(a.event, INFINITE);
+            let Some(event_raw) = wait_info else {
+                MAPPED_DONE.fetch_max(batch_gen, Ordering::AcqRel);
+                DONE_WAIT.notify_all();
+                break;
+            };
+            guard.inflight = true;
+            drop(guard);
+            // SAFETY: `AsideState::inflight` ensures exclusive access to `a.event`.
+            unsafe { WaitForSingleObject(HANDLE(event_raw as *mut _), INFINITE) };
+            let mut guard = ASIDE.lock().unwrap_or_else(|e| e.into_inner());
+            MAPPED_DONE.fetch_max(batch_gen, Ordering::AcqRel);
+            guard.inflight = false;
+            DONE_WAIT.notify_all();
+            break;
         }
     }
     let us = started.elapsed().as_micros() as u64;
@@ -11732,23 +11772,23 @@ mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at 
         let keeps = |memory| super::vram_idle_for(memory, true);
         let gib = 1024 * 1024 * 1024;
         assert_eq!(keeps(Some([100, 67, 0, 0])), 600_000);
-        assert_eq!(keeps(Some([100, 68, 0, 0])), 30_000);
-        assert_eq!(keeps(Some([100, 75, 0, 0])), 2_500);
-        assert_eq!(keeps(Some([100, 85, 0, 0])), 1_000);
-        assert_eq!(keeps(None), 5_000);
+        assert_eq!(keeps(Some([100, 68, 0, 0])), 60_000);
+        assert_eq!(keeps(Some([100, 75, 0, 0])), 10_000);
+        assert_eq!(keeps(Some([100, 85, 0, 0])), 4_000);
+        assert_eq!(keeps(None), 20_000);
         // Normal (< 75%)
-        assert_eq!(vram_idle_ms(Some([10 * gib, 0, 0, 0])), 5_000);
-        assert_eq!(vram_idle_ms(Some([10 * gib, 7 * gib, 0, 0])), 5_000);
-        assert_eq!(vram_idle_ms(Some([100, 74, 0, 0])), 5_000);
+        assert_eq!(vram_idle_ms(Some([10 * gib, 0, 0, 0])), 20_000);
+        assert_eq!(vram_idle_ms(Some([10 * gib, 7 * gib, 0, 0])), 20_000);
+        assert_eq!(vram_idle_ms(Some([100, 74, 0, 0])), 20_000);
         // Moderate (75%..85%)
-        assert_eq!(vram_idle_ms(Some([100, 75, 0, 0])), 2_500);
-        assert_eq!(vram_idle_ms(Some([100, 84, 0, 0])), 2_500);
+        assert_eq!(vram_idle_ms(Some([100, 75, 0, 0])), 10_000);
+        assert_eq!(vram_idle_ms(Some([100, 84, 0, 0])), 10_000);
         // High (>= 85%, including over-budget)
-        assert_eq!(vram_idle_ms(Some([100, 85, 0, 0])), 1_000);
-        assert_eq!(vram_idle_ms(Some([10 * gib, 12 * gib, 0, 0])), 1_000);
+        assert_eq!(vram_idle_ms(Some([100, 85, 0, 0])), 4_000);
+        assert_eq!(vram_idle_ms(Some([10 * gib, 12 * gib, 0, 0])), 4_000);
         // Missing or zero budget falls back to normal
-        assert_eq!(vram_idle_ms(None), 5_000);
-        assert_eq!(vram_idle_ms(Some([0, 100, 0, 0])), 5_000);
+        assert_eq!(vram_idle_ms(None), 20_000);
+        assert_eq!(vram_idle_ms(Some([0, 100, 0, 0])), 20_000);
     }
 
     #[test]
@@ -11757,10 +11797,10 @@ mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at 
         let gib = 1 << 30;
         assert_eq!(vram_keep(100 * gib, 84 * gib).0, 600_000);
         // Past it: the longest idle ones, enough to come down.
-        assert_eq!(vram_keep(100 * gib, 88 * gib), (5_000, 8 * gib));
-        assert_eq!(vram_keep(100 * gib, 95 * gib), (3_000, 11 * gib));
-        assert_eq!(vram_keep(100 * gib, 120 * gib), (3_000, 36 * gib));
-        assert_eq!(vram_keep(0, 7).0, 5_000);
+        assert_eq!(vram_keep(100 * gib, 88 * gib), (45_000, 5 * gib));
+        assert_eq!(vram_keep(100 * gib, 95 * gib), (15_000, 6 * gib));
+        assert_eq!(vram_keep(100 * gib, 120 * gib), (15_000, 31 * gib));
+        assert_eq!(vram_keep(0, 7).0, 45_000);
     }
 
     #[test]
@@ -11795,8 +11835,8 @@ mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at 
 
         let gib = 1 << 30;
         assert_eq!(super::vram_keep_with_thresholds(100 * gib, 77 * gib, 78, 85).0, 600_000);
-        assert_eq!(super::vram_keep_with_thresholds(100 * gib, 80 * gib, 78, 85), (5_000, 7 * gib));
-        assert_eq!(super::vram_keep_with_thresholds(100 * gib, 90 * gib, 78, 85), (3_000, 14 * gib));
+        assert_eq!(super::vram_keep_with_thresholds(100 * gib, 80 * gib, 78, 85), (45_000, 4 * gib));
+        assert_eq!(super::vram_keep_with_thresholds(100 * gib, 90 * gib, 78, 85), (15_000, 9 * gib));
     }
 }
 
