@@ -24,10 +24,10 @@ Build desenvolvida, testada e validada nesta configuração real:
 ### 1. Iluminação Ambiente, Sombras e Remoção de Manchas ([`crates/victory-gpu/src/ambient.rs`](crates/victory-gpu/src/ambient.rs))
 Sem o construtor BVH em tempo real (`VICTORY_BVH_BUILDER=0`), o shader original `CS_ScreenProbes_TemporalResolve` deixa ruído binário (blocos brancos e pretos) em ambientes internos e áreas escuras, enquanto a oclusão de vincos esmagava rostos, interiores e fachadas na sombra para `#000000`.
 
-- **Anti-manchas com preservação de céu/luz:** teto configurável sobre o histórico de probes (`VICTORY_AMBIENT_CAP`, padrão `1.65`) e mistura controlada (`VICTORY_AMBIENT_KEEP`, padrão `0.45`) com rejeição suave de picos aberrantes (`trust = keep_was * saturate(2.4 - has / top)`), evitando manchas azuladas/brancas em azulejos escuros.
+- **Preservação total de faróis, postes e luzes locais com anti-manchas:** teto calibrado (`VICTORY_AMBIENT_CAP`, padrão `3.5`) e mistura alta (`VICTORY_AMBIENT_KEEP`, padrão `0.9`) sem descarte brusco de picos iluminados (`has / top`), preservando o bounce real de faróis, postes e letreiros enquanto filtra probes magenta/corrompidos.
 - **Fim das casas e interiores `#000000`:** `mean()` agora calcula média ponderada pelas células iluminadas (`lit_sum / lit_w` com `80%` de peso) para que céu/paredes em `0.0` não zerem a radiância ambiente; piso suave na oclusão (`open = lerp(0.68, 1.0, ...)`) e piso diurno proporcional (`0.42 * cells[CELLS].rgb`), iluminando construções na sombra (ex.: fachadas sem sol direto) sem lavar áreas claras.
-- **Visibilidade real em salas escuras sem lâmpada:** preenchimento hemisférico mínimo (`VICTORY_AMBIENT_FLOOR`, padrão `0.35` / perfil `0.45`), atenuado suavemente em zonas claras (`1 / (1 + lum * 1.1)`).
-- **Névoa interna controlada:** `VICTORY_AMBIENT_AIR=0.7` limita o espalhamento volumétrico em cômodos fechados.
+- **Visibilidade em salas escuras sem matar a noite nem auto-exposição:** preenchimento hemisférico contido (`VICTORY_AMBIENT_FLOOR`, padrão `0.12`), com queda rápida (`1 / (1 + lum * 4.5)`) para manter o contraste noturno e deixar luzes pontuais brilharem.
+- **Volumétricos de faróis e postes intactos:** `VICTORY_AMBIENT_AIR=0` mantém `CS_AccumulateLocalLightInscatteringVolume` sem corte artificial nos cones de luz dos carros e postes.
 
 ### 2. Controle Rígido de VRAM (Sem Spill PCIe), Retenção e Buffer Fit ([`residency.rs`](crates/victory-gpu/src/residency.rs), [`pool.rs`](crates/victory-gpu/src/pool.rs), [`shadow.rs`](crates/victory-gpu/src/shadow.rs), [`list.rs`](crates/victory-gpu/src/list.rs), [`host.rs`](crates/victory-gpu/src/host.rs))
 - Monitoramento contínuo de pressão em memória compartilhada (`NON_LOCAL` / `Shared RAM`) via DXGI (`shared_pressure_for` / `host_shared_pressure`) e liberação proativa (`reclaim_memory_for_oom`) com fallback em blocos menores no `relay` e `card_back`.
@@ -49,15 +49,15 @@ Sem o construtor BVH em tempo real (`VICTORY_BVH_BUILDER=0`), o shader original 
 
 | Switch | Valor Padrão | Função |
 |---|---|---|
-| `VICTORY_OUTPUT` / `VICTORY_UPSCALER` / `VICTORY_RENDER_SCALE` | `2560x1440` / `6` / `0.58` | Saída `2K` (`2560x1440` tela e HUD) com upscaler próprio do título (`~1485x835` interno -> menos da metade do custo GPU do 4K) |
+| `VICTORY_OUTPUT` / `VICTORY_UPSCALER` / `-Console` | `1664x936` / `7` / `series-s` | Perfil `936p Series S` com AMD FidelityFX FSR nativo (`1109x624` interno -> `1664x936` nítido e maior FPS) |
 | `VICTORY_TEXTURE_ROOM_PERCENT` / `VICTORY_VRAM_TARGET_PERCENT` / `VICTORY_VRAM_EVICT_PERCENT` / `VICTORY_POOL_KEEP_PERCENT` | `90` / `87` / `92` / `82` | Mantém texturas recentes enquanto há folga e corta rápido antes do estouro PCIe em `7.2 GB` |
 | `VICTORY_CARD_BUFFERS_MIN_KB` / `VICTORY_CARD_BUFFERS_MB` / `VICTORY_POOL_SPARES_MAX` / `VICTORY_STAGING_KEPT` | `256` / `1024` / `2` / `4` | Mantém buffers pesados na GDDR6 sem desperdiçar blocos vazios de `64 MiB` na VRAM |
 | `VICTORY_TEXTURE_STAGE_MB` / `VICTORY_EARLY_TEXTURES_MS` / `VICTORY_TEXTURE_LOOK_MS` | `640` / `32` / `400` | Drena filas de streaming rapidamente ao virar ou mover a câmera |
-| `VICTORY_THIN_THREADS` / `VICTORY_UNDER_THREADS` / `VICTORY_VIEW_THREADS` / `VICTORY_LAND_THREADS` / `VICTORY_LAND_SKIP` / `VICTORY_TITLE_PRIORITIES` | `4` / `4` / `4` / `4` / `1` / `1` | Equilibra workers em 10 cores físicos deixando CPU livre para áudio e threads de streaming do jogo |
+| `VICTORY_THIN_THREADS` / `VICTORY_UNDER_THREADS` / `VICTORY_VIEW_THREADS` / `VICTORY_LAND_THREADS` / `VICTORY_PIPELINE_WORKERS` / `VICTORY_LAND_SKIP` / `VICTORY_TITLE_PRIORITIES` | `4` / `4` / `4` / `4` / `4` / `1` / `1` | Equilibra workers em 10 cores físicos deixando CPU livre para áudio e compilação rápida de shaders |
 | `VICTORY_TITLE_FPS` / `VICTORY_FRAME_INTERVAL_MS` | `60` / `0` | Remove espera quantizada em múltiplos de `16.7 ms` entregando o quadro assim que a GPU termina |
 | `VICTORY_ASK_EARLY` | `4` | Antecipa consultas de `write watch` fora da thread de submissão |
-| `VICTORY_AMBIENT` / `VICTORY_AMBIENT_SHADE` / `VICTORY_AMBIENT_AIR` | `1.35` / `0.35,0.45` / `0.7` | Iluminação ambiente forte em sombras/construções com vincos limpos e névoa contida |
-| `VICTORY_AMBIENT_CAP` / `VICTORY_AMBIENT_KEEP` / `VICTORY_AMBIENT_FLOOR` | `1.65` / `0.45` / `0.45` | Remove manchas azuladas em salas escuras mantendo boa iluminação e zero `#000000` |
+| `VICTORY_AMBIENT` / `VICTORY_AMBIENT_SHADE` / `VICTORY_AMBIENT_AIR` | `1.0` / `0.4,0.45` / `0` | GI limpo em interiores sem cortar faróis, postes nem feixes volumétricos locais |
+| `VICTORY_AMBIENT_CAP` / `VICTORY_AMBIENT_KEEP` / `VICTORY_AMBIENT_FLOOR` | `3.5` / `0.9` / `0.12` | Preserva luzes locais reais e evita manchas sem lavar áreas noturnas ou matar `#000` |
 | `VICTORY_AMBIENT_SETTLE` | `250,3,2.0` | Adaptação rápida ao entrar/sair de interiores |
 | `VICTORY_PORT_CONSTANTS` / `VICTORY_PORT_DESCRIPTORS` / `VICTORY_PORT_CBV` / `VICTORY_PORT_GUARD` / `VICTORY_PORT_JOURNAL` | `1` | Patches de portabilidade PC para constantes, descritores, CBVs, guardas e journal |
 | `VICTORY_RESIDENCY` / `VICTORY_LOG` | `0` / filtro enxuto | Sem limitador artificial de upload e sem flood de `port_descriptors` |

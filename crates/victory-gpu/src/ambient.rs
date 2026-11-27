@@ -113,33 +113,34 @@ fn air() -> f32 {
 }
 
 /// Upper multiple of the diffuse estimate allowed from the title's own probe
-/// output (`VICTORY_AMBIENT_CAP`; default 1.65). Lowering this keeps broken
-/// indoor probe blocks from glowing bright white or blue next to dark walls.
+/// output (`VICTORY_AMBIENT_CAP`; default 3.5). Bounds broken indoor probe
+/// blocks while preserving local headlight and streetlamp indirect bounces.
 fn cap() -> f32 {
     static SET: OnceLock<f32> = OnceLock::new();
     *SET.get_or_init(|| {
         let set = std::env::var("VICTORY_AMBIENT_CAP").unwrap_or_default();
-        set.trim().parse().ok().filter(|v: &f32| v.is_finite() && *v >= 1.0).unwrap_or(1.65)
+        set.trim().parse().ok().filter(|v: &f32| v.is_finite() && *v >= 1.0).unwrap_or(3.5)
     })
 }
 
 /// Share (0..=1) of the capped probe output blended above the smooth estimate
-/// (`VICTORY_AMBIENT_KEEP`; default 0.45).
+/// (`VICTORY_AMBIENT_KEEP`; default 0.9).
 fn keep_was() -> f32 {
     static SET: OnceLock<f32> = OnceLock::new();
     *SET.get_or_init(|| {
         let set = std::env::var("VICTORY_AMBIENT_KEEP").unwrap_or_default();
-        set.trim().parse().ok().filter(|v: &f32| v.is_finite() && (0.0..=1.0).contains(v)).unwrap_or(0.45)
+        set.trim().parse().ok().filter(|v: &f32| v.is_finite() && (0.0..=1.0).contains(v)).unwrap_or(0.9)
     })
 }
 
 /// Minimum low-light hemisphere ambient fill (`VICTORY_AMBIENT_FLOOR`; default
-/// 0.35, 0: off) so night exteriors and dark interiors do not crush to black.
+/// 0.12, 0: off) so pitch-black rooms remain visible without washing out night
+/// exteriors or dimming local lights through auto-exposure.
 fn floor_level() -> f32 {
     static SET: OnceLock<f32> = OnceLock::new();
     *SET.get_or_init(|| {
         let set = std::env::var("VICTORY_AMBIENT_FLOOR").unwrap_or_default();
-        set.trim().parse().ok().filter(|v: &f32| v.is_finite() && *v >= 0.0).unwrap_or(0.35)
+        set.trim().parse().ok().filter(|v: &f32| v.is_finite() && *v >= 0.0).unwrap_or(0.12)
     })
 }
 
@@ -449,21 +450,19 @@ void raise(uint3 at : SV_DispatchThreadID) {
     found = max(found, bounce_floor);
     if (ambient_floor > 0.0) {
         float3 floor_light = float3(0.96, 0.98, 1.0) * (ambient_floor * level * hemi * open);
-        found += floor_light / (1.0 + dot(found, LUMA) * 1.1);
+        found += floor_light / (1.0 + dot(found, LUMA) * 4.5);
     }
     float3 was = unpack(light[p]);
     // Filter magenta garbage probes left by uninitialized/corrupted memory on AMD.
     if (was.g < 0.5 * min(was.r, was.b) && max(was.r, was.b) > 0.02) was = 0.0;
     float left = dot(was, LUMA);
-    // What the program left counts as far as it can be true: the sky's light
-    // outdoors, not the blocks of other memory. Dampen violent probe spikes
-    // (broken indoor ScreenProbes when BVH is off) smoothly toward `found`.
+    // Keep the title's own local lamp and headlight indirect bounce up to
+    // `bound`, rather than discarding pixels where local light exceeds `found`.
     float bound = fresh > 0.0 ? lerp(1.0, most, saturate(cells[CELLS].a / fresh)) : most;
-    float top = max(dot(found, LUMA) * bound, 1e-6);
+    float top = max(dot(found, LUMA), 0.16) * bound;
     float has = dot(was, LUMA);
-    float trust = keep_was * saturate(2.4 - has / top);
     was *= min(1.0, top / max(has, 1e-6));
-    float3 written = lerp(found, max(was, found), trust);
+    float3 written = lerp(found, max(was, found), keep_was);
     light[p] = pack(written);
     if (probe != 0 && (at.x & 15) == 0 && (at.y & 15) == 0) {
         uint ignored;

@@ -71,7 +71,7 @@ if not defined VICTORY_TEXTURE_CATCHUP set "VICTORY_TEXTURE_CATCHUP=1"
 if not defined VICTORY_TEXTURE_STAGE_MB set "VICTORY_TEXTURE_STAGE_MB=640"
 if not defined VICTORY_EARLY_TEXTURES_MS set "VICTORY_EARLY_TEXTURES_MS=32"
 if not defined VICTORY_TEXTURE_LOOK_MS set "VICTORY_TEXTURE_LOOK_MS=400"
-if not defined VICTORY_PIPELINE_WORKERS set "VICTORY_PIPELINE_WORKERS=3"
+if not defined VICTORY_PIPELINE_WORKERS set "VICTORY_PIPELINE_WORKERS=4"
 if not defined VICTORY_THIN_THREADS set "VICTORY_THIN_THREADS=4"
 if not defined VICTORY_UNDER_THREADS set "VICTORY_UNDER_THREADS=4"
 if not defined VICTORY_VIEW_THREADS set "VICTORY_VIEW_THREADS=4"
@@ -99,13 +99,13 @@ if not defined VICTORY_THIN set "VICTORY_THIN=1"
 if not defined VICTORY_JOIN_PARTS set "VICTORY_JOIN_PARTS=8"
 if not defined VICTORY_UPLOAD_AHEAD set "VICTORY_UPLOAD_AHEAD=1"
 
-:: Iluminacao ambiente + sombras limpas (tira manchas azuladas em paredes escuras e mantem salas/exteriores claros)
-if not defined VICTORY_AMBIENT set "VICTORY_AMBIENT=1.35"
-if not defined VICTORY_AMBIENT_SHADE set "VICTORY_AMBIENT_SHADE=0.35,0.45"
-if not defined VICTORY_AMBIENT_AIR set "VICTORY_AMBIENT_AIR=0.7"
-if not defined VICTORY_AMBIENT_CAP set "VICTORY_AMBIENT_CAP=1.65"
-if not defined VICTORY_AMBIENT_KEEP set "VICTORY_AMBIENT_KEEP=0.45"
-if not defined VICTORY_AMBIENT_FLOOR set "VICTORY_AMBIENT_FLOOR=0.45"
+:: Iluminacao completa de farois, postes e interiores (VICTORY_AMBIENT_AIR=0 preserva volumetricos dos farois/postes)
+if not defined VICTORY_AMBIENT set "VICTORY_AMBIENT=1.0"
+if not defined VICTORY_AMBIENT_SHADE set "VICTORY_AMBIENT_SHADE=0.4,0.45"
+if not defined VICTORY_AMBIENT_AIR set "VICTORY_AMBIENT_AIR=0"
+if not defined VICTORY_AMBIENT_CAP set "VICTORY_AMBIENT_CAP=3.5"
+if not defined VICTORY_AMBIENT_KEEP set "VICTORY_AMBIENT_KEEP=0.9"
+if not defined VICTORY_AMBIENT_FLOOR set "VICTORY_AMBIENT_FLOOR=0.12"
 if not defined VICTORY_AMBIENT_SETTLE set "VICTORY_AMBIENT_SETTLE=250,3,2.0"
 
 :: Renderer ports da build AMD (em "safe", desliga os 4 experimentais mantendo CBV + VRAM)
@@ -118,10 +118,9 @@ if /i "%mode%"=="safe" (
   if not defined VICTORY_PORT_GUARD set "VICTORY_PORT_GUARD=1"
   if not defined VICTORY_PORT_JOURNAL set "VICTORY_PORT_JOURNAL=1"
 )
-:: Saida 2K nitida com upscaler nativo (render interno 1485x835 -> 2560x1440 final e HUD 2K, sem estourar VRAM)
-if not defined VICTORY_OUTPUT set "VICTORY_OUTPUT=2560x1440"
-if not defined VICTORY_UPSCALER set "VICTORY_UPSCALER=6"
-if not defined VICTORY_RENDER_SCALE set "VICTORY_RENDER_SCALE=0.58"
+:: Saida 936p Series S com AMD FidelityFX FSR nativo (render interno 2/3 -> 1664x936 nitido e alto FPS)
+if not defined VICTORY_OUTPUT set "VICTORY_OUTPUT=1664x936"
+if not defined VICTORY_UPSCALER set "VICTORY_UPSCALER=7"
 if not defined VICTORY_TITLE_FPS set "VICTORY_TITLE_FPS=60"
 if not defined VICTORY_FRAME_INTERVAL_MS set "VICTORY_FRAME_INTERVAL_MS=0"
 if /i "%mode%"=="diag" if not defined VICTORY_D3D12_DRED set "VICTORY_D3D12_DRED=light"
@@ -129,7 +128,7 @@ if /i "%mode%"=="diag" if not defined VICTORY_D3D12_DRED set "VICTORY_D3D12_DRED
 :: Logs direcionados para pasta logs\ sem flood per-draw nem 120k WARNs de port_descriptors
 if not defined VICTORY_LOG if not defined RUST_LOG set "VICTORY_LOG=warn,victory_gpu::port_descriptors=error,victory_gpu::host=info,victory_gpu::queue=info,victory_gpu::shadow=info,victory_gpu::pipeline=info,victory_gpu::texture=info,victory_gpu::resource=info,victory_gpu::ambient=info"
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Run-WithErrorLog.ps1" -Runner "%runner%" -GameExe "%VICTORY_GAME_DIR%\game_scarlett_master.exe" -Console "series-x" -Mode "%mode%"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Run-WithErrorLog.ps1" -Runner "%runner%" -GameExe "%VICTORY_GAME_DIR%\game_scarlett_master.exe" -Console "series-s" -Mode "%mode%"
 set "rc=%errorlevel%"
 if %rc% neq 0 pause
 exit /b %rc%
