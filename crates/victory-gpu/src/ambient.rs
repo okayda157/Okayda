@@ -296,8 +296,8 @@ void mean() {
     float4 was = cells[CELLS];
     float3 flat_mean = sum / CELLS;
     float lit_frac = lit_w / CELLS;
-    float3 lit_mean = lit_sum / max(lit_w, CELLS * 0.22);
-    float3 now = lerp(flat_mean, lit_mean, smoothstep(0.05, 0.30, lit_frac) * 0.85);
+    float3 lit_mean = lit_sum / max(lit_w, CELLS * 0.06);
+    float3 now = lerp(flat_mean, lit_mean, smoothstep(0.02, 0.18, lit_frac) * 0.88);
     // (`jump` > 0: a change of more than that factor either way is
     // followed at once, as a new room is.)
     float a = max(dot(now, LUMA), 1e-5), b = max(dot(was.rgb, LUMA), 1e-5);
@@ -451,15 +451,15 @@ void raise(uint3 at : SV_DispatchThreadID) {
     found = all + 0.85 * float3(dot(sr.xyz, n), dot(sg.xyz, n), dot(sb.xyz, n)) / sum;
     found = clamp(found, 0.35 * all, 2.0 * all);
     if (any(isnan(found)) || any(isinf(found))) found = cells[CELLS].rgb;
-    float hemi = 0.82 + 0.18 * clamp(n.y, -1.0, 1.0);
+    float hemi = 0.84 + 0.16 * clamp(n.y, -1.0, 1.0);
     float3 sky_tint = lerp(float3(1.03, 0.99, 0.94), float3(0.94, 0.98, 1.05), saturate(n.y * 0.5 + 0.5));
-    found = lerp(found, cells[CELLS].rgb, 0.45) * level * open * sky_tint;
-    float3 bounce_floor = cells[CELLS].rgb * (0.50 * level * hemi * open) * sky_tint;
+    found = lerp(found, cells[CELLS].rgb, 0.48) * level * open * sky_tint;
+    float3 bounce_floor = cells[CELLS].rgb * (0.56 * level * hemi * open) * sky_tint;
     found = max(found, bounce_floor);
     if (ambient_floor > 0.0) {
-        float near_room = lerp(0.50, 1.0, 1.0 - smoothstep(8.0, 32.0, c.z));
+        float near_room = lerp(0.85, 1.0, 1.0 - smoothstep(10.0, 40.0, c.z));
         float3 floor_light = float3(0.96, 0.98, 1.0) * (ambient_floor * level * hemi * open * near_room);
-        found += floor_light / (1.0 + dot(found, LUMA) * 4.0);
+        found += floor_light / (1.0 + dot(found, LUMA) * 1.5);
     }
     float3 was = unpack(light[p]);
     // Filter magenta and saturated pure-blue garbage probes left on AMD without BVH,

@@ -209,20 +209,22 @@ pub fn output_code(width: u32, height: u32) -> Vec<u8> {
     c.push(0xb8); // mov eax, width
     c.extend(width.to_le_bytes());
     c.extend([0x89, 0x86, 0x04, 0x02, 0x00, 0x00]); // mov [rsi+204h], eax
+    c.extend([0x89, 0x86, 0xf4, 0x01, 0x00, 0x00]); // mov [rsi+1f4h], eax (uiResolution.width)
     c.push(0xbf); // mov edi, height
     c.extend(height.to_le_bytes());
     c.extend([0x89, 0xbe, 0x08, 0x02, 0x00, 0x00]); // mov [rsi+208h], edi
+    c.extend([0x89, 0xbe, 0xf8, 0x01, 0x00, 0x00]); // mov [rsi+1f8h], edi (uiResolution.height)
     c.extend([0x8b, 0x2d]); // mov ebp, [screen height]
     c.extend(rel(SCREEN_HEIGHT, at + c.len() + 4));
     c.extend([0x89, 0xc1, 0x89, 0xfa]); // mov ecx, eax ; mov edx, edi
     c.push(0xe8); // call the setter
     c.extend(rel(SET_SCREEN_SIZE, at + c.len() + 4));
-    let end = OUTPUT.bytes.len();
-    c.extend([0x39, 0xfd, 0x74, (end - (c.len() + 4)) as u8]); // cmp ebp, edi ; je end
-    c.extend([0xb1, 0x01, 0xe8]); // mov cl, 1 ; call
+    // `SCREEN_HEIGHT` starts at 1080 on boot, so a `cmp ebp, edi; je` skip omits
+    // the initial `0x32b9b38f` UI layout notification at `1920x1080`. Passing
+    // `cl = (ebp != edi)` lets `HEIGHT_CHANGED` fire once while `[+0x76cf7f0]` is 0.
+    c.extend([0x31, 0xc9, 0x39, 0xfd, 0x0f, 0x95, 0xc1, 0xe8]); // xor ecx, ecx ; cmp ebp, edi ; setne cl ; call
     c.extend(rel(HEIGHT_CHANGED, at + c.len() + 4));
-    c.extend([0xeb, (end - (c.len() + 2)) as u8]); // jmp end
-    c.resize(end, 0xcc);
+    c.resize(OUTPUT.bytes.len(), 0xcc);
     c
 }
 
@@ -388,20 +390,21 @@ mod tests {
         assert_eq!(c[0], 0xb8);
         assert_eq!(c[1..5], 1920u32.to_le_bytes());
         assert_eq!(c[5..11], [0x89, 0x86, 0x04, 0x02, 0x00, 0x00]);
-        assert_eq!(c[12..16], 1080u32.to_le_bytes());
-        assert_eq!(c[16..22], [0x89, 0xbe, 0x08, 0x02, 0x00, 0x00]);
-        let target = |op_end: usize| (OUTPUT.at + op_end) as i64 + i64::from(i32::from_le_bytes(c[op_end - 4..op_end].try_into().unwrap()));
-        assert_eq!(c[22..24], [0x8b, 0x2d]);
-        assert_eq!(target(28), SCREEN_HEIGHT as i64);
-        assert_eq!(c[32], 0xe8);
-        assert_eq!(target(37), SET_SCREEN_SIZE as i64);
-        assert_eq!(c[37..40], [0x39, 0xfd, 0x74]);
-        assert_eq!(41 + c[40] as usize, 61, "je lands at the end");
-        assert_eq!(c[43], 0xe8);
-        assert_eq!(target(48), HEIGHT_CHANGED as i64);
-        assert_eq!(c[48], 0xeb);
-        assert_eq!(50 + c[49] as usize, 61, "jmp lands at the end");
-        assert!(c[50..].iter().all(|&x| x == 0xcc));
+        assert_eq!(c[11..17], [0x89, 0x86, 0xf4, 0x01, 0x00, 0x00]);
+        assert_eq!(c[17], 0xbf);
+        assert_eq!(c[18..22], 1080u32.to_le_bytes());
+        assert_eq!(c[22..28], [0x89, 0xbe, 0x08, 0x02, 0x00, 0x00]);
+        assert_eq!(c[28..34], [0x89, 0xbe, 0xf8, 0x01, 0x00, 0x00]);
+        let target = |op_end: usize| {
+            (OUTPUT.at + op_end) as i64
+                + i64::from(i32::from_le_bytes(c[op_end - 4..op_end].try_into().unwrap()))
+        };
+        assert_eq!(c[34..36], [0x8b, 0x2d]);
+        assert_eq!(target(40), SCREEN_HEIGHT as i64);
+        assert_eq!(c[44], 0xe8);
+        assert_eq!(target(49), SET_SCREEN_SIZE as i64);
+        assert_eq!(c[49..57], [0x31, 0xc9, 0x39, 0xfd, 0x0f, 0x95, 0xc1, 0xe8]);
+        assert_eq!(target(61), HEIGHT_CHANGED as i64);
     }
 
     #[test]
