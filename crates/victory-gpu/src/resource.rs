@@ -2148,24 +2148,41 @@ pub(crate) fn let_go_idle() {
     let all = textures();
     // With a limit, the longest idle first.
     let mut by_age: Vec<(u64, usize)> = Vec::new();
+    const PART: usize = 8192;
+    const EVICT_PART: usize = 24_576;
+    static FROM: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    static FROM_EVICT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    static WHOLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let whole = *WHOLE.get_or_init(|| std::env::var_os("VICTORY_TEXTURE_SWEEP").is_some_and(|v| v == "whole"));
+    let began = std::time::Instant::now();
     if most != u64::MAX {
-        for &at in all.iter() {
+        let evict_from = if whole { 0 } else { FROM_EVICT.load(Relaxed) };
+        let limit = if whole { usize::MAX } else { EVICT_PART };
+        let mut scanned = 0usize;
+        let mut next_at = 0usize;
+        let mut cut = false;
+        for &at in all.range(evict_from..).take(limit) {
+            scanned += 1;
+            next_at = at + 1;
             // SAFETY: as below.
             let r = unsafe { &*(at as *const Resource) };
             let used = r.host.used.load(Relaxed);
             if used != 0 && fills(&r.desc) && crate::host::long_ago(used, idle_ms, IDLE_FRAMES) {
                 by_age.push((used & 0xffff_ffff, at));
             }
+            if !whole && scanned >= 2048 && (by_age.len() >= 1024 || began.elapsed().as_micros() >= 2500) {
+                cut = true;
+                break;
+            }
+        }
+        if !whole {
+            FROM_EVICT.store(if !cut && scanned < limit { 0 } else { next_at }, Relaxed);
         }
         by_age.sort_unstable();
     }
     // Without one, while textures are kept for minutes, a part of them at
     // each look, the next one at the next: a play has over 100,000
     // (`VICTORY_TEXTURE_SWEEP=whole`: all each time, as before).
-    const PART: usize = 8192;
-    static FROM: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    static WHOLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let whole = *WHOLE.get_or_init(|| std::env::var_os("VICTORY_TEXTURE_SWEEP").is_some_and(|v| v == "whole"));
     let part = if most != u64::MAX {
         0
     } else if whole || idle_ms < 60_000 {
@@ -2175,7 +2192,6 @@ pub(crate) fn let_go_idle() {
     };
     let from = if part == PART { FROM.load(Relaxed) } else { 0 };
     let mut looked = 0;
-    let began = std::time::Instant::now();
     for at in all.range(from..).take(part).copied().chain(by_age.iter().map(|&(_, at)| at)) {
         if bytes >= most {
             break;

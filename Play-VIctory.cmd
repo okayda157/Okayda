@@ -41,9 +41,9 @@ if not defined VICTORY_WINDOW_BUDGET_MB set "VICTORY_WINDOW_BUDGET_MB=1024"
 if not defined VICTORY_CARD_ROOM_FOR_BUFFERS set "VICTORY_CARD_ROOM_FOR_BUFFERS=1"
 if not defined VICTORY_CARD_ROOM_FOR_TARGETS_MB set "VICTORY_CARD_ROOM_FOR_TARGETS_MB=1536"
 if not defined VICTORY_TEXTURE_ROOM_PERCENT set "VICTORY_TEXTURE_ROOM_PERCENT=85"
-if not defined VICTORY_VRAM_TARGET_PERCENT set "VICTORY_VRAM_TARGET_PERCENT=78"
-if not defined VICTORY_VRAM_EVICT_PERCENT set "VICTORY_VRAM_EVICT_PERCENT=85"
-if not defined VICTORY_POOL_KEEP_PERCENT set "VICTORY_POOL_KEEP_PERCENT=78"
+if not defined VICTORY_VRAM_TARGET_PERCENT set "VICTORY_VRAM_TARGET_PERCENT=84"
+if not defined VICTORY_VRAM_EVICT_PERCENT set "VICTORY_VRAM_EVICT_PERCENT=88"
+if not defined VICTORY_POOL_KEEP_PERCENT set "VICTORY_POOL_KEEP_PERCENT=82"
 if not defined VICTORY_POOL_SPARES_MAX set "VICTORY_POOL_SPARES_MAX=6"
 if not defined VICTORY_STAGING_KEPT set "VICTORY_STAGING_KEPT=2"
 if not defined VICTORY_SCRATCH_KEPT_MB set "VICTORY_SCRATCH_KEPT_MB=64"
@@ -57,14 +57,15 @@ if not defined VICTORY_RESIDENCY set "VICTORY_RESIDENCY=0"
 if not defined VICTORY_TEXTURE_CATCHUP set "VICTORY_TEXTURE_CATCHUP=1"
 if not defined VICTORY_TEXTURE_STAGE_MB set "VICTORY_TEXTURE_STAGE_MB=256"
 if not defined VICTORY_PIPELINE_WORKERS set "VICTORY_PIPELINE_WORKERS=6"
-if not defined VICTORY_THIN_THREADS set "VICTORY_THIN_THREADS=8"
-if not defined VICTORY_UNDER_THREADS set "VICTORY_UNDER_THREADS=6"
-if not defined VICTORY_VIEW_THREADS set "VICTORY_VIEW_THREADS=4"
-if not defined VICTORY_LAND_THREADS set "VICTORY_LAND_THREADS=6"
+if not defined VICTORY_THIN_THREADS set "VICTORY_THIN_THREADS=10"
+if not defined VICTORY_UNDER_THREADS set "VICTORY_UNDER_THREADS=8"
+if not defined VICTORY_VIEW_THREADS set "VICTORY_VIEW_THREADS=8"
+if not defined VICTORY_LAND_THREADS set "VICTORY_LAND_THREADS=10"
 if not defined VICTORY_FAST_CORES set "VICTORY_FAST_CORES=0"
 
-:: Aceleracao completa na GPU (compute offload + async submit, sem stage 2 bloated L0)
+:: Aceleracao completa na GPU (compute offload + async submit, write-watch antecipado, sem stage 2 bloated L0)
 if not defined VICTORY_ASYNC_SUBMIT set "VICTORY_ASYNC_SUBMIT=1"
+if not defined VICTORY_ASK_EARLY set "VICTORY_ASK_EARLY=4"
 if not defined VICTORY_TEXTURE_NO_WAIT set "VICTORY_TEXTURE_NO_WAIT=1"
 if not defined VICTORY_RELAY set "VICTORY_RELAY=2"
 if not defined VICTORY_WIDE_BACK set "VICTORY_WIDE_BACK=1"
@@ -78,10 +79,18 @@ if not defined VICTORY_MAP_THREADS set "VICTORY_MAP_THREADS=1"
 if not defined VICTORY_TITLE_PRIORITIES set "VICTORY_TITLE_PRIORITIES=0"
 if not defined VICTORY_CARD_AWAKE set "VICTORY_CARD_AWAKE=1"
 if not defined VICTORY_SHOW_AFTER set "VICTORY_SHOW_AFTER=1"
-if not defined VICTORY_AMBIENT set "VICTORY_AMBIENT=0.8"
 if not defined VICTORY_THIN set "VICTORY_THIN=1"
 if not defined VICTORY_JOIN_PARTS set "VICTORY_JOIN_PARTS=8"
 if not defined VICTORY_UPLOAD_AHEAD set "VICTORY_UPLOAD_AHEAD=1"
+
+:: Iluminacao ambiente + sombras limpas (remove manchas brancas em interiores, rostos pretos e neblina de ceu dentro de comodos)
+if not defined VICTORY_AMBIENT set "VICTORY_AMBIENT=1.0"
+if not defined VICTORY_AMBIENT_SHADE set "VICTORY_AMBIENT_SHADE=0.55,0.45"
+if not defined VICTORY_AMBIENT_AIR set "VICTORY_AMBIENT_AIR=1.2"
+if not defined VICTORY_AMBIENT_CAP set "VICTORY_AMBIENT_CAP=1.55"
+if not defined VICTORY_AMBIENT_KEEP set "VICTORY_AMBIENT_KEEP=0.55"
+if not defined VICTORY_AMBIENT_FLOOR set "VICTORY_AMBIENT_FLOOR=0.045"
+if not defined VICTORY_AMBIENT_SETTLE set "VICTORY_AMBIENT_SETTLE=250,3,2.0"
 
 :: Renderer ports da build AMD (em "safe", desliga os 4 experimentais mantendo CBV + VRAM)
 if /i "%mode%"=="safe" (
@@ -93,12 +102,15 @@ if /i "%mode%"=="safe" (
   if not defined VICTORY_PORT_GUARD set "VICTORY_PORT_GUARD=1"
   if not defined VICTORY_PORT_JOURNAL set "VICTORY_PORT_JOURNAL=1"
 )
-if not defined VICTORY_OUTPUT set "VICTORY_OUTPUT=1920x1080"
+:: Resolucao alvo ~30 FPS na RX 6600 (720p externo + upscaler nativo 0.85x = ~1088x612 interno, HUD 720p)
+if not defined VICTORY_OUTPUT set "VICTORY_OUTPUT=1280x720"
+if not defined VICTORY_UPSCALER set "VICTORY_UPSCALER=6"
+if not defined VICTORY_RENDER_SCALE set "VICTORY_RENDER_SCALE=0.85"
 if not defined VICTORY_FRAME_INTERVAL_MS set "VICTORY_FRAME_INTERVAL_MS=16.667"
 if /i "%mode%"=="diag" if not defined VICTORY_D3D12_DRED set "VICTORY_D3D12_DRED=light"
 
-:: Logs direcionados para pasta logs\ sem flood per-draw
-if not defined VICTORY_LOG if not defined RUST_LOG set "VICTORY_LOG=warn,victory_gpu::host=info,victory_gpu::queue=info,victory_gpu::shadow=info,victory_gpu::pipeline=info,victory_gpu::texture=info,victory_gpu::resource=info"
+:: Logs direcionados para pasta logs\ sem flood per-draw nem 120k WARNs de port_descriptors
+if not defined VICTORY_LOG if not defined RUST_LOG set "VICTORY_LOG=warn,victory_gpu::port_descriptors=error,victory_gpu::host=info,victory_gpu::queue=info,victory_gpu::shadow=info,victory_gpu::pipeline=info,victory_gpu::texture=info,victory_gpu::resource=info,victory_gpu::ambient=info"
 
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Run-WithErrorLog.ps1" -Runner "%runner%" -GameExe "%VICTORY_GAME_DIR%\game_scarlett_master.exe" -Console "series-s" -Mode "%mode%"
 set "rc=%errorlevel%"

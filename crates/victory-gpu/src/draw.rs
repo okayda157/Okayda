@@ -917,7 +917,7 @@ fn heap_buffer_pass(heap: &crate::descriptor::Heap, host: &crate::descriptor::ho
         Some(((shadow, address, address + len), written))
     };
     // Some slots at a time, on several threads.
-    const AT_A_TIME: usize = 256;
+    const AT_A_TIME: usize = 512;
     let parts: Vec<&[u32]> = slots.chunks(AT_A_TIME).collect();
     let found: Vec<std::sync::OnceLock<Vec<_>>> = parts.iter().map(|_| Default::default()).collect();
     crate::land::each_view(false, parts.len(), &|n| {
@@ -951,15 +951,42 @@ fn heap_buffer_pass(heap: &crate::descriptor::Heap, host: &crate::descriptor::ho
     }
     #[cfg(feature = "diagnostics")]
     let looked = std::time::Instant::now();
-    // Per host copy, the span its picked views cover.
+    // Per host copy, the span its picked views cover (reduced in parallel chunks).
+    const SPAN_CHUNK: usize = 8192;
+    let span_chunks: Vec<&[Option<(std::sync::Arc<crate::shadow::Shadow>, u64, u64)>]> = ranges.0.chunks(SPAN_CHUNK).collect();
     let mut spans: crate::host::ByCopy<(std::sync::Arc<crate::shadow::Shadow>, u64, u64)> = Default::default();
     let mut views = 0u32;
-    for (shadow, from, to) in ranges.ranges() {
-        views += 1;
-        let key = std::sync::Arc::as_ptr(shadow) as usize;
-        let span = spans.entry(key).or_insert_with(|| (shadow.clone(), *from, *to));
-        span.1 = span.1.min(*from);
-        span.2 = span.2.max(*to);
+    if span_chunks.len() <= 1 {
+        for (shadow, from, to) in ranges.ranges() {
+            views += 1;
+            let key = std::sync::Arc::as_ptr(shadow) as usize;
+            let span = spans.entry(key).or_insert_with(|| (shadow.clone(), *from, *to));
+            span.1 = span.1.min(*from);
+            span.2 = span.2.max(*to);
+        }
+    } else {
+        let partials: Vec<std::sync::OnceLock<(u32, crate::host::ByCopy<(std::sync::Arc<crate::shadow::Shadow>, u64, u64)>)>> =
+            span_chunks.iter().map(|_| Default::default()).collect();
+        crate::land::each_view(false, span_chunks.len(), &|n| {
+            let mut local_spans: crate::host::ByCopy<(std::sync::Arc<crate::shadow::Shadow>, u64, u64)> = Default::default();
+            let mut local_views = 0u32;
+            for (shadow, from, to) in span_chunks[n].iter().flatten() {
+                local_views += 1;
+                let key = std::sync::Arc::as_ptr(shadow) as usize;
+                let span = local_spans.entry(key).or_insert_with(|| (shadow.clone(), *from, *to));
+                span.1 = span.1.min(*from);
+                span.2 = span.2.max(*to);
+            }
+            let _ = partials[n].set((local_views, local_spans));
+        });
+        for (local_views, local_spans) in partials.into_iter().filter_map(std::sync::OnceLock::into_inner) {
+            views += local_views;
+            for (key, (shadow, from, to)) in local_spans {
+                let span = spans.entry(key).or_insert_with(|| (shadow, from, to));
+                span.1 = span.1.min(from);
+                span.2 = span.2.max(to);
+            }
+        }
     }
     let bytes: u64 = spans.values().map(|s| s.2 - s.1).sum();
     // Memory that is not write-watched is copied whole by every refresh.
@@ -974,21 +1001,30 @@ fn heap_buffer_pass(heap: &crate::descriptor::Heap, host: &crate::descriptor::ho
         std::env::var("VICTORY_UNWATCHED_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(1)
     });
     let mut found = Vec::with_capacity(spans.len());
-    let mut next_unwatched = std::collections::HashMap::new();
-    for (shadow, from, to) in spans.values() {
-        if every > 1 && shadow.unwatched() {
-            let id = shadow.id();
-            if let Some(&(last, low, high)) = unwatched.get(&id)
-                && frame >= last && frame - last < every && low <= *from && *to <= high
-            {
-                next_unwatched.insert(id, (last, low, high));
-                continue;
+    if every > 1 {
+        let mut next_unwatched = std::collections::HashMap::with_capacity(spans.len());
+        for (shadow, from, to) in spans.values() {
+            if shadow.unwatched() {
+                let id = shadow.id();
+                if let Some(&(last, low, high)) = unwatched.get(&id)
+                    && frame >= last && frame - last < every && low <= *from && *to <= high
+                {
+                    next_unwatched.insert(id, (last, low, high));
+                    continue;
+                }
+                next_unwatched.insert(id, (frame, *from, *to));
             }
-            next_unwatched.insert(id, (frame, *from, *to));
+            found.push((shadow.clone(), *from, (*to).min(*from + shadow.left(*from))));
         }
-        found.push((shadow.clone(), *from, (*to).min(*from + shadow.left(*from))));
+        *unwatched = next_unwatched;
+    } else {
+        if !unwatched.is_empty() {
+            unwatched.clear();
+        }
+        for (shadow, from, to) in spans.values() {
+            found.push((shadow.clone(), *from, (*to).min(*from + shadow.left(*from))));
+        }
     }
-    *unwatched = next_unwatched;
     drop(kept);
     #[cfg(feature = "diagnostics")]
     let refreshed = std::time::Instant::now();

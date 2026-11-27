@@ -112,6 +112,37 @@ fn air() -> f32 {
     })
 }
 
+/// Upper multiple of the diffuse estimate allowed from the title's own probe
+/// output (`VICTORY_AMBIENT_CAP`; default 1.55). Lowering this keeps broken
+/// indoor probe blocks from glowing bright white next to dark walls.
+fn cap() -> f32 {
+    static SET: OnceLock<f32> = OnceLock::new();
+    *SET.get_or_init(|| {
+        let set = std::env::var("VICTORY_AMBIENT_CAP").unwrap_or_default();
+        set.trim().parse().ok().filter(|v: &f32| v.is_finite() && *v >= 1.0).unwrap_or(1.55)
+    })
+}
+
+/// Share (0..=1) of the capped probe output blended above the smooth estimate
+/// (`VICTORY_AMBIENT_KEEP`; default 0.55).
+fn keep_was() -> f32 {
+    static SET: OnceLock<f32> = OnceLock::new();
+    *SET.get_or_init(|| {
+        let set = std::env::var("VICTORY_AMBIENT_KEEP").unwrap_or_default();
+        set.trim().parse().ok().filter(|v: &f32| v.is_finite() && (0.0..=1.0).contains(v)).unwrap_or(0.55)
+    })
+}
+
+/// Minimum low-light hemisphere ambient fill (`VICTORY_AMBIENT_FLOOR`; default
+/// 0.045, 0: off) so night exteriors and dark interiors do not crush to black.
+fn floor_level() -> f32 {
+    static SET: OnceLock<f32> = OnceLock::new();
+    *SET.get_or_init(|| {
+        let set = std::env::var("VICTORY_AMBIENT_FLOOR").unwrap_or_default();
+        set.trim().parse().ok().filter(|v: &f32| v.is_finite() && *v >= 0.0).unwrap_or(0.045)
+    })
+}
+
 /// How the slow mean of the light around follows the frames
 /// (`VICTORY_AMBIENT_SETTLE=<time constant in ms>[,<jump factor>[,<fresh
 /// seconds>]]`; unset: 250,3; 0: 0.04 of the way a frame, as before, which is 25
@@ -199,7 +230,7 @@ fn shade() -> [f32; 2] {
 }
 
 const SOURCE: &str = r#"
-#define RS "RootConstants(num32BitConstants=15, b0), DescriptorTable(SRV(t0)), DescriptorTable(UAV(u0)), UAV(u1), UAV(u2), UAV(u3)"
+#define RS "RootConstants(num32BitConstants=17, b0), DescriptorTable(SRV(t0)), DescriptorTable(UAV(u0)), UAV(u1), UAV(u2), UAV(u3)"
 #define CX 64
 #define CY 36
 #define CELLS (CX * CY)
@@ -210,6 +241,7 @@ cbuffer Set : register(b0) {
     float near; float tan_y; uint width; uint height;
     float follow; float most; float air; uint probe;
     float jump; float fresh; float dt;
+    float keep_was; float ambient_floor;
 };
 Texture2D<float> depth : register(t0);
 // Cells: the light they send out (then, at CELLS, the slow mean), from
@@ -281,7 +313,7 @@ void place(uint3 at : SV_DispatchThreadID) {
 void gather(uint3 at : SV_DispatchThreadID) {
     float2 size = float2(width, height);
     float3 p = seen(int2((float2(at.xy) + 0.5) * size / float2(PX, PY)), size);
-    float r2 = 0.25 + 0.0025 * p.z * p.z;
+    float r2 = 0.55 + 0.006 * p.z * p.z;
     float whole = 0;
     float3 toward = 0, light = 0, red = 0, green = 0, blue = 0;
     for (uint i = 0; i < CELLS; i++) {
@@ -369,10 +401,10 @@ void raise(uint3 at : SV_DispatchThreadID) {
             float2 o = float2(cos(a), sin(a)) * (sqrt((i + 0.5) / N) * px);
             float3 v = seen(p + int2(round(o)), size) - c;
             float vv = dot(v, v);
-            float over = dot(v, n) - 0.004 * c.z - 0.005;
+            float over = dot(v, n) - 0.010 * c.z - 0.015;
             sum += max(over, 0.0) / sqrt(vv + 1e-6) * saturate(1.0 - vv / (radius * radius));
         }
-        open = saturate(1.0 - strength * 2.0 * sum / N);
+        open = lerp(0.38, 1.0, saturate(1.0 - strength * 1.35 * sum / N));
     }
     float3 found;
     if (constant > 0.0) {
@@ -399,23 +431,27 @@ void raise(uint3 at : SV_DispatchThreadID) {
         sum += w;
     }
     float3 all = float3(sr.w, sg.w, sb.w) / sum;
-    found = all + 1.2 * float3(dot(sr.xyz, n), dot(sg.xyz, n), dot(sb.xyz, n)) / sum;
-    found = clamp(found, 0.2 * all, 2.5 * all);
-    found = lerp(found, cells[CELLS].rgb, 0.2) * level * open;
+    found = all + 0.85 * float3(dot(sr.xyz, n), dot(sg.xyz, n), dot(sb.xyz, n)) / sum;
+    found = clamp(found, 0.35 * all, 2.0 * all);
+    found = lerp(found, cells[CELLS].rgb, 0.30) * level * open;
+    if (ambient_floor > 0.0) {
+        float hemi = 0.82 + 0.18 * clamp(n.y, -1.0, 1.0);
+        float3 floor_light = float3(0.92, 0.95, 1.0) * (ambient_floor * level * hemi * open);
+        found += floor_light / (1.0 + dot(found, LUMA) * 5.0);
+    }
     float3 was = unpack(light[p]);
     // Filter magenta garbage probes left by uninitialized/corrupted memory on AMD.
     if (was.g < 0.5 * min(was.r, was.b) && max(was.r, was.b) > 0.02) was = 0.0;
     float left = dot(was, LUMA);
     // What the program left counts as far as it can be true: the sky's light
-    // outdoors, not the blocks of other memory.
-    // For `fresh` seconds after the light around jumped (a new room) the
-    // title's leftover counts for no more than the estimate, then up to
-    // `most` times it again: its history holds the place before.
+    // outdoors, not the blocks of other memory. Dampen violent probe spikes
+    // (broken indoor ScreenProbes when BVH is off) smoothly toward `found`.
     float bound = fresh > 0.0 ? lerp(1.0, most, saturate(cells[CELLS].a / fresh)) : most;
     float top = max(dot(found, LUMA) * bound, 1e-6);
     float has = dot(was, LUMA);
+    float trust = keep_was * saturate(2.5 - has / top);
     was *= min(1.0, top / max(has, 1e-6));
-    float3 written = max(was, found);
+    float3 written = lerp(found, max(was, found), trust);
     light[p] = pack(written);
     if (probe != 0 && (at.x & 15) == 0 && (at.y & 15) == 0) {
         uint ignored;
@@ -563,19 +599,21 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
     list.keep(&pass.stats);
     let [strength, radius] = shade();
     let floats = [level, constant, strength, radius, 0.1, 0.45];
-    let mut words = [0u32; 15];
+    let mut words = [0u32; 17];
     for (to, v) in words.iter_mut().zip(floats) {
         *to = v.to_bits();
     }
     words[6] = views.size[0];
     words[7] = views.size[1];
     words[8] = follow(role).to_bits();
-    words[9] = 4.0f32.to_bits();
+    words[9] = cap().to_bits();
     words[10] = air().to_bits();
     words[11] = u32::from(crate::lightprobe::on());
     words[12] = settle().map_or(0.0, |s| s.jump).to_bits();
     words[13] = settle().map_or(0.0, |s| s.fresh).to_bits();
     words[14] = (frame_ms(role) / 1000.0).to_bits();
+    words[15] = keep_was().to_bits();
+    words[16] = floor_level().to_bits();
     let l = &list.list;
     // SAFETY: an open list with the heap of the views set; the title's
     // program has just used both views, so their textures are in the states
@@ -583,7 +621,7 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
     unsafe {
         uav_barrier(l);
         l.SetComputeRootSignature(&pass.root);
-        l.SetComputeRoot32BitConstants(0, 15, words.as_ptr().cast(), 0);
+        l.SetComputeRoot32BitConstants(0, 17, words.as_ptr().cast(), 0);
         l.SetComputeRootDescriptorTable(1, views.depth);
         l.SetComputeRootDescriptorTable(2, views.image);
         l.SetComputeRootUnorderedAccessView(3, pass.cells.GetGPUVirtualAddress());
