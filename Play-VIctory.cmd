@@ -27,14 +27,12 @@ if not exist "%VICTORY_GAME_DIR%\game_scarlett_master.exe" (
   exit /b 2
 )
 
-if /i "%mode%"=="diag" (
-  set "runner=%~dp0target\diag\victory.exe"
-) else (
-  set "runner=%~dp0target\release\victory.exe"
-  if not exist "%runner%" set "runner=%~dp0target\diag\victory.exe"
+set "runner="
+for /f "usebackq tokens=1* delims==" %%A in (`powershell -NoProfile -ExecutionPolicy Bypass -File "%root%\scripts\Ensure-Runner.ps1" -Root "%root%" -Mode "%mode%"`) do (
+  if /i "%%A"=="RUNNER" set "runner=%%B"
 )
-if not exist "%runner%" (
-  echo Build primeiro: cargo build --release --locked -p victory
+if not defined runner (
+  pause
   exit /b 2
 )
 

@@ -77,13 +77,15 @@ Não é necessário editar caminhos na mão nem quebrar em pastas com espaços (
 
 ## Como compilar e usar
 
-Pré-requisitos: Windows 10/11 x64 (CPU AVX2), GPU Direct3D 12 (SM 6.6 + Mesh Shaders), Rust toolchain + MSVC Build Tools, e sua pasta própria contendo `game_scarlett_master.exe`.
+Pré-requisitos: Windows 10/11 x64 (CPU AVX2), GPU Direct3D 12 (SM 6.6 + Mesh Shaders) e sua pasta própria contendo `game_scarlett_master.exe`.
+
+- **Modo rápido (sem precisar instalar Rust):** ao rodar **`Play-VIctory.cmd`** em um download novo do GitHub, o script [`scripts/Ensure-Runner.ps1`](scripts/Ensure-Runner.ps1) baixa automaticamente o pacote pré-compilado (`Okayda-win64-release.zip`, gerado pelo GitHub Actions em [`.github/workflows/release.yml`](.github/workflows/release.yml) com `victory.exe` + `D3D12\D3D12Core.dll` 1.620.2) — ou compila localmente se você tiver `cargo` instalado.
 
 ```powershell
-# 1. Compilar binário otimizado
+# Compilação manual (opcional, requer Rust + MSVC Build Tools)
 cargo build --release --locked -p victory
 
-# (Opcional) Compilar perfil com diagnósticos completos / DRED
+# Perfil com diagnósticos completos / DRED
 cargo build --profile diag --locked -p victory --features diagnostics
 ```
 

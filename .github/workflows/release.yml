@@ -1,0 +1,62 @@
+name: Release Binary
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-release:
+    name: Build Windows x64 Release
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release --locked -p victory
+
+      - name: Package victory.exe with Agility SDK 1.620.2
+        shell: pwsh
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP 'okayda-pkg'
+          $d3d = Join-Path $stage 'D3D12'
+          New-Item -ItemType Directory -Force -Path $d3d | Out-Null
+          Copy-Item -Force 'target\release\victory.exe' (Join-Path $stage 'victory.exe')
+
+          $nupkg = Join-Path $env:RUNNER_TEMP 'agility.zip'
+          $ext = Join-Path $env:RUNNER_TEMP 'agility-ext'
+          Invoke-WebRequest -Uri 'https://api.nuget.org/v3-flatcontainer/microsoft.direct3d.d3d12/1.620.2/microsoft.direct3d.d3d12.1.620.2.nupkg' -OutFile $nupkg
+          Expand-Archive -Path $nupkg -DestinationPath $ext -Force
+          Copy-Item -Force (Join-Path $ext 'build\native\bin\x64\D3D12Core.dll') (Join-Path $d3d 'D3D12Core.dll')
+
+          $zipOut = Join-Path $env:GITHUB_WORKSPACE 'Okayda-win64-release.zip'
+          Compress-Archive -Path "$stage\*" -DestinationPath $zipOut -Force
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $tag = 'latest-build'
+          $notes = "Build Windows x64 pre-compilada do commit $($env:GITHUB_SHA.Substring(0, 7)) com D3D12 Agility SDK 1.620.2."
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag 'Okayda-win64-release.zip' --clobber
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            gh release edit $tag --title "Okayda Latest Windows x64 Build" --notes $notes --latest
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } else {
+            gh release create $tag 'Okayda-win64-release.zip' --title "Okayda Latest Windows x64 Build" --notes $notes --latest
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
