@@ -184,8 +184,8 @@ pub(crate) fn vram_keep_configured(budget: u64, used: u64) -> (u64, u64) {
 
 fn vram_keep_with_thresholds(budget: u64, used: u64, target_pct: u64, evict_pct: u64) -> (u64, u64) {
     const KEPT_MS: u64 = 600_000;
-    const IDLE_MS: u64 = 45_000;
-    const SHORT_MS: u64 = 15_000;
+    const IDLE_MS: u64 = 30_000;
+    const SHORT_MS: u64 = 3_000;
     if budget == 0 {
         return (IDLE_MS, u64::MAX);
     }
@@ -195,7 +195,7 @@ fn vram_keep_with_thresholds(budget: u64, used: u64, target_pct: u64, evict_pct:
     } else if used < share(evict_pct) {
         (IDLE_MS, used - share(target_pct.saturating_sub(2)))
     } else {
-        (SHORT_MS, used - share(evict_pct.saturating_sub(4).max(target_pct.saturating_sub(1))))
+        (SHORT_MS, used - share(target_pct.saturating_sub(2)))
     }
 }
 
@@ -215,10 +215,10 @@ pub(crate) fn vram_idle_ms(video_memory: Option<[u64; 4]>) -> u64 {
 
 fn vram_idle_for(video_memory: Option<[u64; 4]>, keep: bool) -> u64 {
     const KEPT_MS: u64 = 600_000;
-    const LONG_MS: u64 = 60_000;
-    const NORMAL_MS: u64 = 20_000;
-    const MODERATE_MS: u64 = 10_000;
-    const HIGH_MS: u64 = 4_000;
+    const LONG_MS: u64 = 45_000;
+    const NORMAL_MS: u64 = 15_000;
+    const MODERATE_MS: u64 = 5_000;
+    const HIGH_MS: u64 = 2_000;
     static THRESHOLDS: OnceLock<(u128, u128)> = OnceLock::new();
     let (target_pct, evict_pct) = *THRESHOLDS.get_or_init(|| {
         let parse = |key: &str| {
@@ -11772,23 +11772,23 @@ mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at 
         let keeps = |memory| super::vram_idle_for(memory, true);
         let gib = 1024 * 1024 * 1024;
         assert_eq!(keeps(Some([100, 67, 0, 0])), 600_000);
-        assert_eq!(keeps(Some([100, 68, 0, 0])), 60_000);
-        assert_eq!(keeps(Some([100, 75, 0, 0])), 10_000);
-        assert_eq!(keeps(Some([100, 85, 0, 0])), 4_000);
-        assert_eq!(keeps(None), 20_000);
+        assert_eq!(keeps(Some([100, 68, 0, 0])), 45_000);
+        assert_eq!(keeps(Some([100, 75, 0, 0])), 5_000);
+        assert_eq!(keeps(Some([100, 85, 0, 0])), 2_000);
+        assert_eq!(keeps(None), 15_000);
         // Normal (< 75%)
-        assert_eq!(vram_idle_ms(Some([10 * gib, 0, 0, 0])), 20_000);
-        assert_eq!(vram_idle_ms(Some([10 * gib, 7 * gib, 0, 0])), 20_000);
-        assert_eq!(vram_idle_ms(Some([100, 74, 0, 0])), 20_000);
+        assert_eq!(vram_idle_ms(Some([10 * gib, 0, 0, 0])), 15_000);
+        assert_eq!(vram_idle_ms(Some([10 * gib, 7 * gib, 0, 0])), 15_000);
+        assert_eq!(vram_idle_ms(Some([100, 74, 0, 0])), 15_000);
         // Moderate (75%..85%)
-        assert_eq!(vram_idle_ms(Some([100, 75, 0, 0])), 10_000);
-        assert_eq!(vram_idle_ms(Some([100, 84, 0, 0])), 10_000);
+        assert_eq!(vram_idle_ms(Some([100, 75, 0, 0])), 5_000);
+        assert_eq!(vram_idle_ms(Some([100, 84, 0, 0])), 5_000);
         // High (>= 85%, including over-budget)
-        assert_eq!(vram_idle_ms(Some([100, 85, 0, 0])), 4_000);
-        assert_eq!(vram_idle_ms(Some([10 * gib, 12 * gib, 0, 0])), 4_000);
+        assert_eq!(vram_idle_ms(Some([100, 85, 0, 0])), 2_000);
+        assert_eq!(vram_idle_ms(Some([10 * gib, 12 * gib, 0, 0])), 2_000);
         // Missing or zero budget falls back to normal
-        assert_eq!(vram_idle_ms(None), 20_000);
-        assert_eq!(vram_idle_ms(Some([0, 100, 0, 0])), 20_000);
+        assert_eq!(vram_idle_ms(None), 15_000);
+        assert_eq!(vram_idle_ms(Some([0, 100, 0, 0])), 15_000);
     }
 
     #[test]
@@ -11797,10 +11797,10 @@ mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at 
         let gib = 1 << 30;
         assert_eq!(vram_keep(100 * gib, 84 * gib).0, 600_000);
         // Past it: the longest idle ones, enough to come down.
-        assert_eq!(vram_keep(100 * gib, 88 * gib), (45_000, 5 * gib));
-        assert_eq!(vram_keep(100 * gib, 95 * gib), (15_000, 6 * gib));
-        assert_eq!(vram_keep(100 * gib, 120 * gib), (15_000, 31 * gib));
-        assert_eq!(vram_keep(0, 7).0, 45_000);
+        assert_eq!(vram_keep(100 * gib, 88 * gib), (30_000, 5 * gib));
+        assert_eq!(vram_keep(100 * gib, 95 * gib), (3_000, 12 * gib));
+        assert_eq!(vram_keep(100 * gib, 120 * gib), (3_000, 37 * gib));
+        assert_eq!(vram_keep(0, 7).0, 30_000);
     }
 
     #[test]
@@ -11835,8 +11835,8 @@ mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at 
 
         let gib = 1 << 30;
         assert_eq!(super::vram_keep_with_thresholds(100 * gib, 77 * gib, 78, 85).0, 600_000);
-        assert_eq!(super::vram_keep_with_thresholds(100 * gib, 80 * gib, 78, 85), (45_000, 4 * gib));
-        assert_eq!(super::vram_keep_with_thresholds(100 * gib, 90 * gib, 78, 85), (15_000, 9 * gib));
+        assert_eq!(super::vram_keep_with_thresholds(100 * gib, 80 * gib, 78, 85), (30_000, 4 * gib));
+        assert_eq!(super::vram_keep_with_thresholds(100 * gib, 90 * gib, 78, 85), (3_000, 14 * gib));
     }
 }
 

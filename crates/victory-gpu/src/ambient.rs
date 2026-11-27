@@ -113,23 +113,23 @@ fn air() -> f32 {
 }
 
 /// Upper multiple of the diffuse estimate allowed from the title's own probe
-/// output (`VICTORY_AMBIENT_CAP`; default 2.8). Lowering this keeps broken
-/// indoor probe blocks from glowing bright white next to dark walls.
+/// output (`VICTORY_AMBIENT_CAP`; default 1.65). Lowering this keeps broken
+/// indoor probe blocks from glowing bright white or blue next to dark walls.
 fn cap() -> f32 {
     static SET: OnceLock<f32> = OnceLock::new();
     *SET.get_or_init(|| {
         let set = std::env::var("VICTORY_AMBIENT_CAP").unwrap_or_default();
-        set.trim().parse().ok().filter(|v: &f32| v.is_finite() && *v >= 1.0).unwrap_or(2.8)
+        set.trim().parse().ok().filter(|v: &f32| v.is_finite() && *v >= 1.0).unwrap_or(1.65)
     })
 }
 
 /// Share (0..=1) of the capped probe output blended above the smooth estimate
-/// (`VICTORY_AMBIENT_KEEP`; default 0.65).
+/// (`VICTORY_AMBIENT_KEEP`; default 0.45).
 fn keep_was() -> f32 {
     static SET: OnceLock<f32> = OnceLock::new();
     *SET.get_or_init(|| {
         let set = std::env::var("VICTORY_AMBIENT_KEEP").unwrap_or_default();
-        set.trim().parse().ok().filter(|v: &f32| v.is_finite() && (0.0..=1.0).contains(v)).unwrap_or(0.65)
+        set.trim().parse().ok().filter(|v: &f32| v.is_finite() && (0.0..=1.0).contains(v)).unwrap_or(0.45)
     })
 }
 
@@ -414,7 +414,7 @@ void raise(uint3 at : SV_DispatchThreadID) {
             float over = dot(v, n) - 0.010 * c.z - 0.015;
             sum += max(over, 0.0) / sqrt(vv + 1e-6) * saturate(1.0 - vv / (radius * radius));
         }
-        open = lerp(0.64, 1.0, saturate(1.0 - strength * 1.15 * sum / N));
+        open = lerp(0.68, 1.0, saturate(1.0 - strength * 1.15 * sum / N));
     }
     float3 found;
     if (constant > 0.0) {
@@ -461,7 +461,7 @@ void raise(uint3 at : SV_DispatchThreadID) {
     float bound = fresh > 0.0 ? lerp(1.0, most, saturate(cells[CELLS].a / fresh)) : most;
     float top = max(dot(found, LUMA) * bound, 1e-6);
     float has = dot(was, LUMA);
-    float trust = keep_was * saturate(3.2 - has / top);
+    float trust = keep_was * saturate(2.4 - has / top);
     was *= min(1.0, top / max(has, 1e-6));
     float3 written = lerp(found, max(was, found), trust);
     light[p] = pack(written);

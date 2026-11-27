@@ -43,27 +43,27 @@ if not defined VICTORY_CACHE_DIR set "VICTORY_CACHE_DIR=%LOCALAPPDATA%\VIctory\c
 if not defined VICTORY_PANEL set "VICTORY_PANEL=1"
 if not defined VICTORY_PIPELINE_BOOK set "VICTORY_PIPELINE_BOOK=1"
 
-:: Dedicacao equilibrada na RX 6600 (8 GB GDDR6): preserva texturas visitadas na VRAM sem saturar barramento/relay
+:: Dedicacao equilibrada na RX 6600 (8 GB GDDR6): buffers >= 256 KB na GPU sem estourar 7.2 GB VRAM (evita spill em PCIe)
 if not defined VICTORY_MEMORY_CARD_MB set "VICTORY_MEMORY_CARD_MB=1536"
 if not defined VICTORY_VRAM_RESERVE_MB set "VICTORY_VRAM_RESERVE_MB=768"
 if not defined VICTORY_CARD_BUFFERS set "VICTORY_CARD_BUFFERS=1"
-if not defined VICTORY_CARD_BUFFERS_MIN_KB set "VICTORY_CARD_BUFFERS_MIN_KB=1024"
-if not defined VICTORY_CARD_BUFFERS_MB set "VICTORY_CARD_BUFFERS_MB=512"
+if not defined VICTORY_CARD_BUFFERS_MIN_KB set "VICTORY_CARD_BUFFERS_MIN_KB=256"
+if not defined VICTORY_CARD_BUFFERS_MB set "VICTORY_CARD_BUFFERS_MB=1024"
 if not defined VICTORY_CARD_WINDOWS_MB set "VICTORY_CARD_WINDOWS_MB=0"
 if not defined VICTORY_WINDOW_BUDGET_MB set "VICTORY_WINDOW_BUDGET_MB=1024"
 if not defined VICTORY_CARD_ROOM_FOR_BUFFERS set "VICTORY_CARD_ROOM_FOR_BUFFERS=1"
 if not defined VICTORY_CARD_ROOM_FOR_TARGETS_MB set "VICTORY_CARD_ROOM_FOR_TARGETS_MB=1024"
-if not defined VICTORY_TEXTURE_ROOM_PERCENT set "VICTORY_TEXTURE_ROOM_PERCENT=96"
-if not defined VICTORY_VRAM_TARGET_PERCENT set "VICTORY_VRAM_TARGET_PERCENT=93"
-if not defined VICTORY_VRAM_EVICT_PERCENT set "VICTORY_VRAM_EVICT_PERCENT=97"
-if not defined VICTORY_POOL_KEEP_PERCENT set "VICTORY_POOL_KEEP_PERCENT=92"
-if not defined VICTORY_POOL_SPARES_MAX set "VICTORY_POOL_SPARES_MAX=6"
+if not defined VICTORY_TEXTURE_ROOM_PERCENT set "VICTORY_TEXTURE_ROOM_PERCENT=90"
+if not defined VICTORY_VRAM_TARGET_PERCENT set "VICTORY_VRAM_TARGET_PERCENT=87"
+if not defined VICTORY_VRAM_EVICT_PERCENT set "VICTORY_VRAM_EVICT_PERCENT=92"
+if not defined VICTORY_POOL_KEEP_PERCENT set "VICTORY_POOL_KEEP_PERCENT=82"
+if not defined VICTORY_POOL_SPARES_MAX set "VICTORY_POOL_SPARES_MAX=2"
 if not defined VICTORY_STAGING_KEPT set "VICTORY_STAGING_KEPT=4"
 if not defined VICTORY_SCRATCH_KEPT_MB set "VICTORY_SCRATCH_KEPT_MB=64"
 if not defined VICTORY_SNAPSHOT_POOL_MB set "VICTORY_SNAPSHOT_POOL_MB=96"
 if not defined VICTORY_LIST_POOL_MAX set "VICTORY_LIST_POOL_MAX=96"
 if not defined VICTORY_BURY_LAG set "VICTORY_BURY_LAG=12"
-if not defined VICTORY_RIPE_BLOCKS set "VICTORY_RIPE_BLOCKS=8"
+if not defined VICTORY_RIPE_BLOCKS set "VICTORY_RIPE_BLOCKS=4"
 
 :: Streaming rapido de texturas com folga para audio/streaming no Xeon 10c/20t
 if not defined VICTORY_RESIDENCY set "VICTORY_RESIDENCY=0"
@@ -99,12 +99,12 @@ if not defined VICTORY_THIN set "VICTORY_THIN=1"
 if not defined VICTORY_JOIN_PARTS set "VICTORY_JOIN_PARTS=8"
 if not defined VICTORY_UPLOAD_AHEAD set "VICTORY_UPLOAD_AHEAD=1"
 
-:: Iluminacao ambiente + sombras limpas (forca luz em salas sem lampada e casas na sombra sem estourar)
+:: Iluminacao ambiente + sombras limpas (tira manchas azuladas em paredes escuras e mantem salas/exteriores claros)
 if not defined VICTORY_AMBIENT set "VICTORY_AMBIENT=1.35"
 if not defined VICTORY_AMBIENT_SHADE set "VICTORY_AMBIENT_SHADE=0.35,0.45"
 if not defined VICTORY_AMBIENT_AIR set "VICTORY_AMBIENT_AIR=0.7"
-if not defined VICTORY_AMBIENT_CAP set "VICTORY_AMBIENT_CAP=2.8"
-if not defined VICTORY_AMBIENT_KEEP set "VICTORY_AMBIENT_KEEP=0.65"
+if not defined VICTORY_AMBIENT_CAP set "VICTORY_AMBIENT_CAP=1.65"
+if not defined VICTORY_AMBIENT_KEEP set "VICTORY_AMBIENT_KEEP=0.45"
 if not defined VICTORY_AMBIENT_FLOOR set "VICTORY_AMBIENT_FLOOR=0.45"
 if not defined VICTORY_AMBIENT_SETTLE set "VICTORY_AMBIENT_SETTLE=250,3,2.0"
 
@@ -118,11 +118,12 @@ if /i "%mode%"=="safe" (
   if not defined VICTORY_PORT_GUARD set "VICTORY_PORT_GUARD=1"
   if not defined VICTORY_PORT_JOURNAL set "VICTORY_PORT_JOURNAL=1"
 )
-:: Saida 4K fixa com upscaler nativo (2560x1440 interno -> 3840x2160 final e HUD 4K)
-if not defined VICTORY_OUTPUT set "VICTORY_OUTPUT=3840x2160"
+:: Saida 2K nitida com upscaler nativo (render interno 1485x835 -> 2560x1440 final e HUD 2K, sem estourar VRAM)
+if not defined VICTORY_OUTPUT set "VICTORY_OUTPUT=2560x1440"
 if not defined VICTORY_UPSCALER set "VICTORY_UPSCALER=6"
-if not defined VICTORY_RENDER_SCALE set "VICTORY_RENDER_SCALE=0.67"
-if not defined VICTORY_FRAME_INTERVAL_MS set "VICTORY_FRAME_INTERVAL_MS=16.667"
+if not defined VICTORY_RENDER_SCALE set "VICTORY_RENDER_SCALE=0.58"
+if not defined VICTORY_TITLE_FPS set "VICTORY_TITLE_FPS=60"
+if not defined VICTORY_FRAME_INTERVAL_MS set "VICTORY_FRAME_INTERVAL_MS=0"
 if /i "%mode%"=="diag" if not defined VICTORY_D3D12_DRED set "VICTORY_D3D12_DRED=light"
 
 :: Logs direcionados para pasta logs\ sem flood per-draw nem 120k WARNs de port_descriptors

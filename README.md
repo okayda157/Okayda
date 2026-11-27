@@ -24,23 +24,24 @@ Build desenvolvida, testada e validada nesta configuração real:
 ### 1. Iluminação Ambiente, Sombras e Remoção de Manchas ([`crates/victory-gpu/src/ambient.rs`](crates/victory-gpu/src/ambient.rs))
 Sem o construtor BVH em tempo real (`VICTORY_BVH_BUILDER=0`), o shader original `CS_ScreenProbes_TemporalResolve` deixa ruído binário (blocos brancos e pretos) em ambientes internos e áreas escuras, enquanto a oclusão de vincos esmagava rostos, interiores e fachadas na sombra para `#000000`.
 
-- **Anti-manchas com preservação de céu/luz:** teto configurável sobre o histórico de probes (`VICTORY_AMBIENT_CAP`, padrão `2.8`) e mistura controlada (`VICTORY_AMBIENT_KEEP`, padrão `0.65`) com rejeição suave de picos aberrantes (`trust = keep_was * saturate(3.2 - has / top)`).
-- **Fim das casas e interiores `#000000`:** `mean()` agora calcula média ponderada pelas células iluminadas (`lit_sum / lit_w` com `80%` de peso) para que céu/paredes em `0.0` não zerem a radiância ambiente; piso suave na oclusão (`open = lerp(0.64, 1.0, ...)`) e piso diurno proporcional (`0.42 * cells[CELLS].rgb`), iluminando construções na sombra (ex.: fachadas sem sol direto) sem lavar áreas claras.
+- **Anti-manchas com preservação de céu/luz:** teto configurável sobre o histórico de probes (`VICTORY_AMBIENT_CAP`, padrão `1.65`) e mistura controlada (`VICTORY_AMBIENT_KEEP`, padrão `0.45`) com rejeição suave de picos aberrantes (`trust = keep_was * saturate(2.4 - has / top)`), evitando manchas azuladas/brancas em azulejos escuros.
+- **Fim das casas e interiores `#000000`:** `mean()` agora calcula média ponderada pelas células iluminadas (`lit_sum / lit_w` com `80%` de peso) para que céu/paredes em `0.0` não zerem a radiância ambiente; piso suave na oclusão (`open = lerp(0.68, 1.0, ...)`) e piso diurno proporcional (`0.42 * cells[CELLS].rgb`), iluminando construções na sombra (ex.: fachadas sem sol direto) sem lavar áreas claras.
 - **Visibilidade real em salas escuras sem lâmpada:** preenchimento hemisférico mínimo (`VICTORY_AMBIENT_FLOOR`, padrão `0.35` / perfil `0.45`), atenuado suavemente em zonas claras (`1 / (1 + lum * 1.1)`).
 - **Névoa interna controlada:** `VICTORY_AMBIENT_AIR=0.7` limita o espalhamento volumétrico em cômodos fechados.
 
-### 2. Retenção de Áreas Visitadas, Anti-OOM e VRAM ([`residency.rs`](crates/victory-gpu/src/residency.rs), [`pool.rs`](crates/victory-gpu/src/pool.rs), [`shadow.rs`](crates/victory-gpu/src/shadow.rs), [`list.rs`](crates/victory-gpu/src/list.rs), [`host.rs`](crates/victory-gpu/src/host.rs))
+### 2. Controle Rígido de VRAM (Sem Spill PCIe), Retenção e Buffer Fit ([`residency.rs`](crates/victory-gpu/src/residency.rs), [`pool.rs`](crates/victory-gpu/src/pool.rs), [`shadow.rs`](crates/victory-gpu/src/shadow.rs), [`list.rs`](crates/victory-gpu/src/list.rs), [`host.rs`](crates/victory-gpu/src/host.rs))
 - Monitoramento contínuo de pressão em memória compartilhada (`NON_LOCAL` / `Shared RAM`) via DXGI (`shared_pressure_for` / `host_shared_pressure`) e liberação proativa (`reclaim_memory_for_oom`) com fallback em blocos menores no `relay` e `card_back`.
-- **Menos re-streaming ao voltar para locais já visitados:** `vram_keep_with_thresholds` e `vram_idle_ms` em [`host.rs`](crates/victory-gpu/src/host.rs) sobem os tempos ociosos para `45s` / `15s` com poda incremental menor perto do alvo, combinados com `VICTORY_VRAM_TARGET_PERCENT=93`, `VICTORY_VRAM_EVICT_PERCENT=97`, `VICTORY_TEXTURE_ROOM_PERCENT=96`, `VICTORY_STAGING_KEPT=4` e `VICTORY_CARD_BUFFERS_MIN_KB=1024` / `VICTORY_CARD_BUFFERS_MB=512` (devolve centenas de MB de VRAM às texturas e corta dezenas de passes de comparação/readback na placa).
-- Desacoplamento do trimming de pools, snapshots e allocators quando `VICTORY_RESIDENCY=0`, eliminando crashes de memória em sessões longas.
-- **Streaming rápido sem inanição no áudio/CPU:** `VICTORY_TEXTURE_STAGE_MB=640`, `VICTORY_EARLY_TEXTURES_MS=32`, `VICTORY_TEXTURE_LOOK_MS=400` e remoção de `VICTORY_TITLE_PRIORITIES=0` para que as threads de streaming não fiquem presas em prioridade `IDLE`.
+- **Fim da cegueira de VRAM fragmentada (`resource.rs`):** `let_go_idle()` e `room()` agora usam `headroom_used.max(used)` e bloqueiam novos uploads acima de `budget`, evitando que blocos fragmentados do pool (`texture_room()`) escondam estouro real de VRAM no DXGI (`8.3 / 7.2 GB`).
+- **Curva inteligente (`vram_keep_with_thresholds`):** segura texturas por `10 min` abaixo de `87%`, `30s` entre `87%–92%`, e descarrega em `3s` acima de `92%` + `VICTORY_POOL_SPARES_MAX=2` / `VICTORY_RIPE_BLOCKS=4`, mantendo a GPU sempre dentro dos `7.2 GB` sem derrubar FPS em paginação PCIe.
+- **Buffers ativos na GDDR6 sem saturar comparação em CPU:** `VICTORY_CARD_BUFFERS_MIN_KB=256` e `VICTORY_CARD_BUFFERS_MB=1024` evitam enviar `> 220 MB/frame` de buffers de volta ao barramento PCIe/CPU.
+- **Streaming rápido sem inanição no áudio/CPU:** `VICTORY_TEXTURE_STAGE_MB=640`, `VICTORY_EARLY_TEXTURES_MS=32`, `VICTORY_TEXTURE_LOOK_MS=400`, `VICTORY_TITLE_FPS=60` + `VICTORY_FRAME_INTERVAL_MS=0` (sem esperas quantizadas de `16.7 ms` entre quadros) e `VICTORY_TITLE_PRIORITIES=1`.
 - Integração com **Direct3D 12 Agility SDK 1.620** e registro automático via [scripts/Run-WithErrorLog.ps1](scripts/Run-WithErrorLog.ps1).
 
 ### 3. Otimizações de CPU, Sincronização e Submissão ([`resource.rs`](crates/victory-gpu/src/resource.rs), [`draw.rs`](crates/victory-gpu/src/draw.rs), [`host.rs`](crates/victory-gpu/src/host.rs))
-- **Eliminação de fila em `host::mapped()`:** coalescência por ticket atômico (`MAPPED_NEEDED` / `MAPPED_DONE`) e liberação do mutex antes do `WaitForSingleObject`, reduzindo stalls serializados na fila de cópia D3D12 ao criar texturas/buffers em várias threads.
+- **Eliminação de fila em `host::mapped()`:** coalescência por ticket atômico (`MAPPED_NEEDED` / `MAPPED_DONE`) e liberação do mutex antes do `WaitForSingleObject`, reduzindo stalls serializados na fila de cópia D3D12 ao criar texturas/buffers em várias threads (uso de CPU reduzido de `98%` para `~20%` no Xeon).
 - **Evicção incremental de texturas (`resource::let_go_idle`):** cursor rotativo (`FROM_EVICT`) limitado a `24.576` itens e `2.5 ms` de orçamento.
 - **Passagem de buffers enxuta (`draw::heap_buffer_pass`):** rotação `HEAP_ROUND = 64`, redução paralela de `spans`, lotes de `512` slots e menos alocações em `unwatched`.
-- **Folga para áudio e render no Xeon 10c/20t:** workers calibrados (`4 / 4 / 4 / 4`, `3` de pipeline) + `VICTORY_LAND_SKIP=1`, reduzindo saturação de CPU em 98% que causava engasgos no mixer de áudio.
+- **Folga para áudio e render no Xeon 10c/20t:** workers calibrados (`4 / 4 / 4 / 4`, `3` de pipeline) + `VICTORY_LAND_SKIP=1`.
 - **Cadência adaptativa de sweep (`host::sweep`):** `2000 ms` fora de pressão e `1000 ms` sob `residency::pressured()`.
 - **Silenciamento de flood no log:** filtro `victory_gpu::port_descriptors=error` no launcher.
 
@@ -48,14 +49,15 @@ Sem o construtor BVH em tempo real (`VICTORY_BVH_BUILDER=0`), o shader original 
 
 | Switch | Valor Padrão | Função |
 |---|---|---|
-| `VICTORY_OUTPUT` / `VICTORY_UPSCALER` / `VICTORY_RENDER_SCALE` | `3840x2160` / `6` / `0.67` | Saída `4K` fixa com upscaler próprio do título (`2560x1440` interno -> `3840x2160` HUD e tela) |
-| `VICTORY_TEXTURE_ROOM_PERCENT` / `VICTORY_VRAM_TARGET_PERCENT` / `VICTORY_VRAM_EVICT_PERCENT` / `VICTORY_POOL_KEEP_PERCENT` | `96` / `93` / `97` / `92` | Mantém áreas visitadas em VRAM por muito mais tempo antes de liberar sob pressão |
-| `VICTORY_CARD_BUFFERS_MIN_KB` / `VICTORY_CARD_BUFFERS_MB` / `VICTORY_STAGING_KEPT` | `1024` / `512` / `4` | Mantém apenas buffers grandes (`>= 1 MiB`) na VRAM, liberando espaço para texturas e cortando comparações/readbacks na GPU |
+| `VICTORY_OUTPUT` / `VICTORY_UPSCALER` / `VICTORY_RENDER_SCALE` | `2560x1440` / `6` / `0.58` | Saída `2K` (`2560x1440` tela e HUD) com upscaler próprio do título (`~1485x835` interno -> menos da metade do custo GPU do 4K) |
+| `VICTORY_TEXTURE_ROOM_PERCENT` / `VICTORY_VRAM_TARGET_PERCENT` / `VICTORY_VRAM_EVICT_PERCENT` / `VICTORY_POOL_KEEP_PERCENT` | `90` / `87` / `92` / `82` | Mantém texturas recentes enquanto há folga e corta rápido antes do estouro PCIe em `7.2 GB` |
+| `VICTORY_CARD_BUFFERS_MIN_KB` / `VICTORY_CARD_BUFFERS_MB` / `VICTORY_POOL_SPARES_MAX` / `VICTORY_STAGING_KEPT` | `256` / `1024` / `2` / `4` | Mantém buffers pesados na GDDR6 sem desperdiçar blocos vazios de `64 MiB` na VRAM |
 | `VICTORY_TEXTURE_STAGE_MB` / `VICTORY_EARLY_TEXTURES_MS` / `VICTORY_TEXTURE_LOOK_MS` | `640` / `32` / `400` | Drena filas de streaming rapidamente ao virar ou mover a câmera |
 | `VICTORY_THIN_THREADS` / `VICTORY_UNDER_THREADS` / `VICTORY_VIEW_THREADS` / `VICTORY_LAND_THREADS` / `VICTORY_LAND_SKIP` / `VICTORY_TITLE_PRIORITIES` | `4` / `4` / `4` / `4` / `1` / `1` | Equilibra workers em 10 cores físicos deixando CPU livre para áudio e threads de streaming do jogo |
+| `VICTORY_TITLE_FPS` / `VICTORY_FRAME_INTERVAL_MS` | `60` / `0` | Remove espera quantizada em múltiplos de `16.7 ms` entregando o quadro assim que a GPU termina |
 | `VICTORY_ASK_EARLY` | `4` | Antecipa consultas de `write watch` fora da thread de submissão |
 | `VICTORY_AMBIENT` / `VICTORY_AMBIENT_SHADE` / `VICTORY_AMBIENT_AIR` | `1.35` / `0.35,0.45` / `0.7` | Iluminação ambiente forte em sombras/construções com vincos limpos e névoa contida |
-| `VICTORY_AMBIENT_CAP` / `VICTORY_AMBIENT_KEEP` / `VICTORY_AMBIENT_FLOOR` | `2.8` / `0.65` / `0.45` | Preserva luz do céu em fachadas sombreadas e garante leitura clara em salas sem luz |
+| `VICTORY_AMBIENT_CAP` / `VICTORY_AMBIENT_KEEP` / `VICTORY_AMBIENT_FLOOR` | `1.65` / `0.45` / `0.45` | Remove manchas azuladas em salas escuras mantendo boa iluminação e zero `#000000` |
 | `VICTORY_AMBIENT_SETTLE` | `250,3,2.0` | Adaptação rápida ao entrar/sair de interiores |
 | `VICTORY_PORT_CONSTANTS` / `VICTORY_PORT_DESCRIPTORS` / `VICTORY_PORT_CBV` / `VICTORY_PORT_GUARD` / `VICTORY_PORT_JOURNAL` | `1` | Patches de portabilidade PC para constantes, descritores, CBVs, guardas e journal |
 | `VICTORY_RESIDENCY` / `VICTORY_LOG` | `0` / filtro enxuto | Sem limitador artificial de upload e sem flood de `port_descriptors` |
