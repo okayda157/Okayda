@@ -404,7 +404,7 @@ void raise(uint3 at : SV_DispatchThreadID) {
             float over = dot(v, n) - 0.010 * c.z - 0.015;
             sum += max(over, 0.0) / sqrt(vv + 1e-6) * saturate(1.0 - vv / (radius * radius));
         }
-        open = lerp(0.38, 1.0, saturate(1.0 - strength * 1.35 * sum / N));
+        open = lerp(0.52, 1.0, saturate(1.0 - strength * 1.15 * sum / N));
     }
     float3 found;
     if (constant > 0.0) {
@@ -433,9 +433,11 @@ void raise(uint3 at : SV_DispatchThreadID) {
     float3 all = float3(sr.w, sg.w, sb.w) / sum;
     found = all + 0.85 * float3(dot(sr.xyz, n), dot(sg.xyz, n), dot(sb.xyz, n)) / sum;
     found = clamp(found, 0.35 * all, 2.0 * all);
-    found = lerp(found, cells[CELLS].rgb, 0.30) * level * open;
+    float hemi = 0.82 + 0.18 * clamp(n.y, -1.0, 1.0);
+    found = lerp(found, cells[CELLS].rgb, 0.40) * level * open;
+    float3 bounce_floor = cells[CELLS].rgb * (0.28 * level * hemi * open);
+    found = max(found, bounce_floor);
     if (ambient_floor > 0.0) {
-        float hemi = 0.82 + 0.18 * clamp(n.y, -1.0, 1.0);
         float3 floor_light = float3(0.92, 0.95, 1.0) * (ambient_floor * level * hemi * open);
         found += floor_light / (1.0 + dot(found, LUMA) * 5.0);
     }
