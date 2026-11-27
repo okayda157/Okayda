@@ -1,0 +1,106 @@
+@echo off
+setlocal EnableExtensions DisableDelayedExpansion
+if not defined VICTORY_GAME_DIR (
+  if exist "%~dp0..\GTA6.Xbox.v1.0.2.1\game_scarlett_master.exe" (
+    set "VICTORY_GAME_DIR=%~dp0..\GTA6.Xbox.v1.0.2.1"
+  ) else (
+    set "VICTORY_GAME_DIR=%~dp0..\GTA6.Xbox.v1.0.2.1"
+  )
+)
+if not exist "%VICTORY_GAME_DIR%\game_scarlett_master.exe" (
+  echo Set VICTORY_GAME_DIR to your own dump folder containing game_scarlett_master.exe. 1>&2
+  pause
+  exit /b 2
+)
+
+:: Padrao: target\release (thin LTO, sem overhead de instrumentacao diag, com HUD F3 e pipeline book).
+:: Use "Play-VIctory.cmd diag" para abrir com depuracao DRED completa, ou "Play-VIctory.cmd safe" sem ports experimentais.
+set "mode=release"
+if /i "%~1"=="diag" set "mode=diag"
+if /i "%~1"=="safe" set "mode=safe"
+
+if /i "%mode%"=="diag" (
+  set "runner=%~dp0target\diag\victory.exe"
+) else (
+  set "runner=%~dp0target\release\victory.exe"
+  if not exist "%runner%" set "runner=%~dp0target\diag\victory.exe"
+)
+if not exist "%runner%" (
+  echo Build primeiro: cargo build --release --locked -p victory
+  exit /b 2
+)
+
+:: Cache isolado desta build AMD (versionado, compativel com VICTORY_PORT_CBV=1)
+if not defined VICTORY_CACHE_DIR set "VICTORY_CACHE_DIR=%LOCALAPPDATA%\VIctory\cache-amd"
+
+:: HUD grafico ao vivo (F3 alterna) + gravacao dos pipelines usados para Warm-AllPipelines.cmd
+if not defined VICTORY_PANEL set "VICTORY_PANEL=1"
+if not defined VICTORY_PIPELINE_BOOK set "VICTORY_PIPELINE_BOOK=1"
+
+:: Sem limitadores de upload/prefetch; destrava threads no Xeon 10c/20t para reduzir SUB
+if not defined VICTORY_RESIDENCY set "VICTORY_RESIDENCY=0"
+if not defined VICTORY_TEXTURE_CATCHUP set "VICTORY_TEXTURE_CATCHUP=1"
+if not defined VICTORY_TEXTURE_STAGE_MB set "VICTORY_TEXTURE_STAGE_MB=512"
+if not defined VICTORY_PIPELINE_WORKERS set "VICTORY_PIPELINE_WORKERS=6"
+if not defined VICTORY_THIN_THREADS set "VICTORY_THIN_THREADS=8"
+if not defined VICTORY_UNDER_THREADS set "VICTORY_UNDER_THREADS=6"
+if not defined VICTORY_VIEW_THREADS set "VICTORY_VIEW_THREADS=4"
+if not defined VICTORY_LAND_THREADS set "VICTORY_LAND_THREADS=6"
+if not defined VICTORY_FAST_CORES set "VICTORY_FAST_CORES=0"
+
+:: Dedicacao maxima segura na RX 6600 (8 GB GDDR6) evitando spillover de 7.5 GB para RAM/pagefile/HD
+if not defined VICTORY_MEMORY_CARD_MB set "VICTORY_MEMORY_CARD_MB=4608"
+if not defined VICTORY_VRAM_RESERVE_MB set "VICTORY_VRAM_RESERVE_MB=3817"
+if not defined VICTORY_CARD_BUFFERS set "VICTORY_CARD_BUFFERS=1"
+if not defined VICTORY_CARD_BUFFERS_MIN_KB set "VICTORY_CARD_BUFFERS_MIN_KB=128"
+if not defined VICTORY_CARD_BUFFERS_MB set "VICTORY_CARD_BUFFERS_MB=1280"
+if not defined VICTORY_CARD_WINDOWS_MB set "VICTORY_CARD_WINDOWS_MB=512"
+if not defined VICTORY_CARD_ROOM_FOR_BUFFERS set "VICTORY_CARD_ROOM_FOR_BUFFERS=1"
+if not defined VICTORY_CARD_ROOM_FOR_TARGETS_MB set "VICTORY_CARD_ROOM_FOR_TARGETS_MB=1536"
+if not defined VICTORY_TEXTURE_ROOM_PERCENT set "VICTORY_TEXTURE_ROOM_PERCENT=91"
+if not defined VICTORY_VRAM_TARGET_PERCENT set "VICTORY_VRAM_TARGET_PERCENT=88"
+if not defined VICTORY_VRAM_EVICT_PERCENT set "VICTORY_VRAM_EVICT_PERCENT=92"
+if not defined VICTORY_POOL_KEEP_PERCENT set "VICTORY_POOL_KEEP_PERCENT=86"
+if not defined VICTORY_RIPE_BLOCKS set "VICTORY_RIPE_BLOCKS=4"
+
+:: Aceleracao completa na GPU (compute offload + async submit)
+if not defined VICTORY_ASYNC_SUBMIT set "VICTORY_ASYNC_SUBMIT=1"
+if not defined VICTORY_TEXTURE_NO_WAIT set "VICTORY_TEXTURE_NO_WAIT=1"
+if not defined VICTORY_RELAY set "VICTORY_RELAY=2"
+if not defined VICTORY_WIDE_BACK set "VICTORY_WIDE_BACK=1"
+if not defined VICTORY_CARD_REHASH_RUNS set "VICTORY_CARD_REHASH_RUNS=1"
+if not defined VICTORY_JOIN_COPIES set "VICTORY_JOIN_COPIES=1"
+if not defined VICTORY_INDIRECT_WINDOW set "VICTORY_INDIRECT_WINDOW=1"
+if not defined VICTORY_RELAY_COPY set "VICTORY_RELAY_COPY=1"
+if not defined VICTORY_CARD_STEPS set "VICTORY_CARD_STEPS=2"
+if not defined VICTORY_INDIRECT_BATCH set "VICTORY_INDIRECT_BATCH=2"
+if not defined VICTORY_MAP_THREADS set "VICTORY_MAP_THREADS=1"
+if not defined VICTORY_TITLE_PRIORITIES set "VICTORY_TITLE_PRIORITIES=0"
+if not defined VICTORY_CARD_AWAKE set "VICTORY_CARD_AWAKE=1"
+if not defined VICTORY_SHOW_AFTER set "VICTORY_SHOW_AFTER=1"
+if not defined VICTORY_AMBIENT set "VICTORY_AMBIENT=0.8"
+if not defined VICTORY_THIN set "VICTORY_THIN=1"
+if not defined VICTORY_JOIN_PARTS set "VICTORY_JOIN_PARTS=8"
+if not defined VICTORY_UPLOAD_AHEAD set "VICTORY_UPLOAD_AHEAD=1"
+
+:: Renderer ports da build AMD (em "safe", desliga os 4 experimentais mantendo CBV + VRAM)
+if /i "%mode%"=="safe" (
+  if not defined VICTORY_PORT_CBV set "VICTORY_PORT_CBV=1"
+) else (
+  if not defined VICTORY_PORT_CONSTANTS set "VICTORY_PORT_CONSTANTS=1"
+  if not defined VICTORY_PORT_DESCRIPTORS set "VICTORY_PORT_DESCRIPTORS=1"
+  if not defined VICTORY_PORT_CBV set "VICTORY_PORT_CBV=1"
+  if not defined VICTORY_PORT_GUARD set "VICTORY_PORT_GUARD=1"
+  if not defined VICTORY_PORT_JOURNAL set "VICTORY_PORT_JOURNAL=1"
+)
+if not defined VICTORY_OUTPUT set "VICTORY_OUTPUT=1920x1080"
+if not defined VICTORY_FRAME_INTERVAL_MS set "VICTORY_FRAME_INTERVAL_MS=16.667"
+if /i "%mode%"=="diag" if not defined VICTORY_D3D12_DRED set "VICTORY_D3D12_DRED=light"
+
+:: Logs direcionados para pasta logs\ sem flood per-draw
+if not defined VICTORY_LOG if not defined RUST_LOG set "VICTORY_LOG=warn,victory_gpu::host=info,victory_gpu::queue=info,victory_gpu::shadow=info,victory_gpu::pipeline=info,victory_gpu::texture=info,victory_gpu::resource=info"
+
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Run-WithErrorLog.ps1" -Runner "%runner%" -GameExe "%VICTORY_GAME_DIR%\game_scarlett_master.exe" -Console "series-s" -Mode "%mode%"
+set "rc=%errorlevel%"
+if %rc% neq 0 pause
+exit /b %rc%
