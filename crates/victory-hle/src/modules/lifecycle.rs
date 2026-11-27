@@ -110,7 +110,7 @@ pub extern "system" fn CreateWindowExW(
     instance: HINSTANCE,
     param: *const c_void,
 ) -> HWND {
-    let (x, y, width, height) = fit(parent, x, y, width, height);
+    let (x, y, width, height) = fit(parent, ex_style, style, !menu.is_null(), x, y, width, height);
     // SAFETY: the title's own arguments, forwarded (the size fitted).
     let hwnd = unsafe {
         wm::CreateWindowExW(
@@ -136,7 +136,7 @@ pub extern "system" fn CreateWindowExA(
     instance: HINSTANCE,
     param: *const c_void,
 ) -> HWND {
-    let (x, y, width, height) = fit(parent, x, y, width, height);
+    let (x, y, width, height) = fit(parent, ex_style, style, !menu.is_null(), x, y, width, height);
     // SAFETY: the title's own arguments, forwarded (the size fitted).
     let hwnd = unsafe {
         wm::CreateWindowExA(
@@ -147,27 +147,78 @@ pub extern "system" fn CreateWindowExA(
     hwnd
 }
 
+fn adjust_window_borders(ex_style: u32, style: u32, has_menu: bool) -> (i32, i32) {
+    if (style & wm::WS_CHILD) != 0 {
+        return (0, 0);
+    }
+    let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    // SAFETY: `rect` is a valid out-parameter for non-client frame extents.
+    let ok = unsafe { wm::AdjustWindowRectEx(&mut rect, style, i32::from(has_menu), ex_style) };
+    if ok == 0 {
+        return (0, 0);
+    }
+    ((rect.right - rect.left).max(0), (rect.bottom - rect.top).max(0))
+}
+
 /// A console title sizes its window to its render target (
 /// the title: 3840x2160 on a Series X), which can exceed the host's screen.
-/// A top-level window larger than the work area is shrunk to fit, keeping
-/// its proportions, and centred; what it shows is scaled to it (the swap
-/// chain stretches). `VICTORY_WINDOW_MAX=WIDTHxHEIGHT` applies a smaller
-/// limit without changing the title's render targets.
-fn fit(parent: HWND, x: i32, y: i32, width: i32, height: i32) -> (i32, i32, i32, i32) {
+/// A top-level window larger than the work area is shrunk to fit, preserving
+/// its client area's proportions across non-client borders, and centred.
+/// `VICTORY_WINDOW_MAX=WIDTHxHEIGHT` applies a smaller limit without changing
+/// the title's render targets.
+fn fit(
+    parent: HWND,
+    ex_style: u32,
+    style: u32,
+    has_menu: bool,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) -> (i32, i32, i32, i32) {
     let mut area = RECT::default();
     // SAFETY: `area` receives the primary monitor's work area.
     let known =
         unsafe { wm::SystemParametersInfoW(wm::SPI_GETWORKAREA, 0, (&raw mut area).cast(), 0) };
     let limit = window_limit();
-    let fitted = fit_with_limit(&area, width, height, limit);
+    let border = adjust_window_borders(ex_style, style, has_menu);
+    let fitted = fit_with_borders(&area, width, height, border, limit);
     if !parent.is_null() || known == 0 || fitted == (width, height) {
         return (x, y, width, height);
     }
-    tracing::info!(width, height, to = ?fitted, ?limit, "title window fitted to the screen");
+    tracing::info!(width, height, to = ?fitted, ?border, ?limit, "title window fitted to the screen");
     let (w, h) = fitted;
     let left = area.left + (area.right - area.left - w) / 2;
     let top = area.top + (area.bottom - area.top - h) / 2;
     (left, top, w, h)
+}
+
+fn fit_with_borders(
+    area: &RECT,
+    width: i32,
+    height: i32,
+    border: (i32, i32),
+    limit: Option<(i32, i32)>,
+) -> (i32, i32) {
+    let (bw, bh) = border;
+    if bw <= 0 && bh <= 0 {
+        return fit_with_limit(area, width, height, limit);
+    }
+    if width <= 0 || height <= 0 {
+        return (width, height);
+    }
+    let aw = (area.right - area.left) - bw;
+    let ah = (area.bottom - area.top) - bh;
+    let (aw, ah) = match limit {
+        Some((mw, mh)) => (aw.min(mw - bw), ah.min(mh - bh)),
+        None => (aw, ah),
+    };
+    if aw <= 0 || ah <= 0 {
+        return fit_with_limit(area, width, height, limit);
+    }
+    let client_area = RECT { left: 0, top: 0, right: aw, bottom: ah };
+    let (cw, ch) = fit_into(&client_area, width, height);
+    (cw + bw, ch + bh)
 }
 
 fn parse_window_limit(value: &str) -> Option<(i32, i32)> {
@@ -618,5 +669,14 @@ mod tests {
         }
         let seen = COMMANDS.with(|c| c.borrow().clone());
         assert_eq!(seen, [wm::SC_MINIMIZE as usize]);
+    }
+
+    #[test]
+    fn bordered_window_fit_preserves_client_aspect_ratio() {
+        let small = RECT { left: 0, top: 0, right: 1600, bottom: 860 };
+        assert_eq!(fit_with_borders(&small, 1920, 1080, (16, 39), None), (1475, 860));
+        assert_eq!(fit_with_borders(&small, 3840, 2160, (16, 39), None), (1475, 860));
+        let large = RECT { left: 0, top: 0, right: 2560, bottom: 1400 };
+        assert_eq!(fit_with_borders(&large, 1920, 1080, (16, 39), None), (1936, 1119));
     }
 }

@@ -47,7 +47,7 @@ if not defined VICTORY_PIPELINE_BOOK set "VICTORY_PIPELINE_BOOK=1"
 if not defined VICTORY_MEMORY_CARD_MB set "VICTORY_MEMORY_CARD_MB=1536"
 if not defined VICTORY_VRAM_RESERVE_MB set "VICTORY_VRAM_RESERVE_MB=768"
 if not defined VICTORY_CARD_BUFFERS set "VICTORY_CARD_BUFFERS=1"
-if not defined VICTORY_CARD_BUFFERS_MIN_KB set "VICTORY_CARD_BUFFERS_MIN_KB=256"
+if not defined VICTORY_CARD_BUFFERS_MIN_KB set "VICTORY_CARD_BUFFERS_MIN_KB=128"
 if not defined VICTORY_CARD_BUFFERS_MB set "VICTORY_CARD_BUFFERS_MB=1024"
 if not defined VICTORY_CARD_WINDOWS_MB set "VICTORY_CARD_WINDOWS_MB=0"
 if not defined VICTORY_WINDOW_BUDGET_MB set "VICTORY_WINDOW_BUDGET_MB=1024"
@@ -100,13 +100,13 @@ if not defined VICTORY_THIN set "VICTORY_THIN=1"
 if not defined VICTORY_JOIN_PARTS set "VICTORY_JOIN_PARTS=8"
 if not defined VICTORY_UPLOAD_AHEAD set "VICTORY_UPLOAD_AHEAD=1"
 
-:: Iluminacao completa de farois, postes e interiores (VICTORY_AMBIENT_AIR=0 preserva volumetricos dos farois/postes)
+:: Iluminacao completa de farois, postes, exteriores na sombra e interiores (AIR=0 preserva volumetricos locais)
 if not defined VICTORY_AMBIENT set "VICTORY_AMBIENT=1.0"
 if not defined VICTORY_AMBIENT_SHADE set "VICTORY_AMBIENT_SHADE=0.4,0.45"
 if not defined VICTORY_AMBIENT_AIR set "VICTORY_AMBIENT_AIR=0"
-if not defined VICTORY_AMBIENT_CAP set "VICTORY_AMBIENT_CAP=6.0"
-if not defined VICTORY_AMBIENT_KEEP set "VICTORY_AMBIENT_KEEP=0.95"
-if not defined VICTORY_AMBIENT_FLOOR set "VICTORY_AMBIENT_FLOOR=0.08"
+if not defined VICTORY_AMBIENT_CAP set "VICTORY_AMBIENT_CAP=3.2"
+if not defined VICTORY_AMBIENT_KEEP set "VICTORY_AMBIENT_KEEP=0.64"
+if not defined VICTORY_AMBIENT_FLOOR set "VICTORY_AMBIENT_FLOOR=0.24"
 if not defined VICTORY_AMBIENT_SETTLE set "VICTORY_AMBIENT_SETTLE=250,3,2.0"
 
 :: Renderer ports da build AMD (em "safe", desliga os 4 experimentais mantendo CBV + VRAM)
@@ -119,9 +119,9 @@ if /i "%mode%"=="safe" (
   if not defined VICTORY_PORT_GUARD set "VICTORY_PORT_GUARD=1"
   if not defined VICTORY_PORT_JOURNAL set "VICTORY_PORT_JOURNAL=1"
 )
-:: Saida 1080p estavel em Series X (evita crash FSR4 0xc0000094 e OOM Series S), sem VSync e sem trava de FPS
+:: Saida 1920x1080 padrao nativa (render 1.0x sem esticar a tela e sem VICTORY_DISPLAY_MODE), sem VSync e sem trava de FPS
 if not defined VICTORY_OUTPUT set "VICTORY_OUTPUT=1920x1080"
-if not defined VICTORY_DISPLAY_MODE set "VICTORY_DISPLAY_MODE=1920x1080"
+if not defined VICTORY_RENDER_SCALE set "VICTORY_RENDER_SCALE=1.0"
 if not defined VICTORY_DISPLAY_HZ set "VICTORY_DISPLAY_HZ=120"
 if not defined VICTORY_UPSCALER set "VICTORY_UPSCALER=6"
 if not defined VICTORY_VSYNC set "VICTORY_VSYNC=0"

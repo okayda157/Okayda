@@ -10959,6 +10959,34 @@ extern "system" fn window_proc(
     unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
 }
 
+fn fit_window_rect(width: u32, height: u32, border_w: i32, border_h: i32, work: RECT) -> (i32, i32, i32, i32) {
+    let work_w = (work.right - work.left).max(320);
+    let work_h = (work.bottom - work.top).max(240);
+    let max_cw = (work_w - border_w).max(320);
+    let max_ch = (work_h - border_h).max(240);
+    if width as i32 <= max_cw && height as i32 <= max_ch {
+        return (
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            width as i32 + border_w,
+            height as i32 + border_h,
+        );
+    }
+    // Monitor smaller than output size: fit inside work area preserving exact swap-chain aspect.
+    let (cw, ch) = if u64::from(max_cw as u32) * u64::from(height) <= u64::from(max_ch as u32) * u64::from(width) {
+        let h = ((u64::from(max_cw as u32) * u64::from(height)) / u64::from(width.max(1))) as i32;
+        (max_cw, h.max(240))
+    } else {
+        let w = ((u64::from(max_ch as u32) * u64::from(width)) / u64::from(height.max(1))) as i32;
+        (w.max(320), max_ch)
+    };
+    let win_w = cw + border_w;
+    let win_h = ch + border_h;
+    let x = work.left + (work_w - win_w) / 2;
+    let y = work.top + (work_h - win_h) / 2;
+    (x, y, win_w, win_h)
+}
+
 fn make_window(width: u32, height: u32) -> windows::core::Result<HWND> {
     const CLASS: PCWSTR = w!("VIctory");
     // SAFETY: registers our class once and creates a window of it.
@@ -10980,15 +11008,30 @@ fn make_window(width: u32, height: u32) -> windows::core::Result<HWND> {
             bottom: height as i32,
         };
         AdjustWindowRect(&mut rect, WS_OVERLAPPEDWINDOW, false)?;
+        let border_w = (rect.right - rect.left) - width as i32;
+        let border_h = (rect.bottom - rect.top) - height as i32;
+        let mut work = RECT::default();
+        let (x, y, win_w, win_h) = if SystemParametersInfoW(
+            SPI_GETWORKAREA,
+            0,
+            Some((&raw mut work).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+        .is_ok()
+        {
+            fit_window_rect(width, height, border_w, border_h, work)
+        } else {
+            (CW_USEDEFAULT, CW_USEDEFAULT, rect.right - rect.left, rect.bottom - rect.top)
+        };
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
             CLASS,
             w!("VIctory"),
             WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            rect.right - rect.left,
-            rect.bottom - rect.top,
+            x,
+            y,
+            win_w,
+            win_h,
             None,
             None,
             Some(instance.into()),
@@ -11903,6 +11946,17 @@ mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at 
         assert_eq!(super::vram_keep_with_thresholds(100 * gib, 77 * gib, 78, 85).0, 600_000);
         assert_eq!(super::vram_keep_with_thresholds(100 * gib, 80 * gib, 78, 85), (30_000, 4 * gib));
         assert_eq!(super::vram_keep_with_thresholds(100 * gib, 90 * gib, 78, 85), (3_000, 14 * gib));
+    }
+
+    #[test]
+    fn window_rect_fits_work_area_preserving_aspect() {
+        let small = super::RECT { left: 0, top: 0, right: 1600, bottom: 860 };
+        let (x, y, win_w, win_h) = super::fit_window_rect(1920, 1080, 16, 39, small);
+        assert_eq!((win_w, win_h), (1475, 860));
+        assert_eq!((x, y), (62, 0));
+        let large = super::RECT { left: 0, top: 0, right: 2560, bottom: 1400 };
+        let (lx, ly, lw, lh) = super::fit_window_rect(1920, 1080, 16, 39, large);
+        assert_eq!((lx, ly, lw, lh), (super::CW_USEDEFAULT, super::CW_USEDEFAULT, 1936, 1119));
     }
 }
 

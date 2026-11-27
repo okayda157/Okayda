@@ -113,34 +113,34 @@ fn air() -> f32 {
 }
 
 /// Upper multiple of the diffuse estimate allowed from the title's own probe
-/// output (`VICTORY_AMBIENT_CAP`; default 6.0). Bounds broken indoor probe
-/// blocks while giving local headlights and streetlamps plenty of night headroom.
+/// output (`VICTORY_AMBIENT_CAP`; default 3.2). Bounds broken indoor probe
+/// blocks while keeping real local headlight and streetlamp indirect bounces.
 fn cap() -> f32 {
     static SET: OnceLock<f32> = OnceLock::new();
     *SET.get_or_init(|| {
         let set = std::env::var("VICTORY_AMBIENT_CAP").unwrap_or_default();
-        set.trim().parse().ok().filter(|v: &f32| v.is_finite() && *v >= 1.0).unwrap_or(6.0)
+        set.trim().parse().ok().filter(|v: &f32| v.is_finite() && *v >= 1.0).unwrap_or(3.2)
     })
 }
 
 /// Share (0..=1) of the capped probe output blended above the smooth estimate
-/// (`VICTORY_AMBIENT_KEEP`; default 0.95).
+/// (`VICTORY_AMBIENT_KEEP`; default 0.64).
 fn keep_was() -> f32 {
     static SET: OnceLock<f32> = OnceLock::new();
     *SET.get_or_init(|| {
         let set = std::env::var("VICTORY_AMBIENT_KEEP").unwrap_or_default();
-        set.trim().parse().ok().filter(|v: &f32| v.is_finite() && (0.0..=1.0).contains(v)).unwrap_or(0.95)
+        set.trim().parse().ok().filter(|v: &f32| v.is_finite() && (0.0..=1.0).contains(v)).unwrap_or(0.64)
     })
 }
 
 /// Minimum low-light hemisphere ambient fill (`VICTORY_AMBIENT_FLOOR`; default
-/// 0.08, 0: off) so pitch-black rooms remain visible without washing out night
-/// exteriors or dimming local lights through auto-exposure.
+/// 0.24, 0: off) gently weighted for near interiors so dark rooms stay legible
+/// without creating a bright night halo or flattening car/street lights.
 fn floor_level() -> f32 {
     static SET: OnceLock<f32> = OnceLock::new();
     *SET.get_or_init(|| {
         let set = std::env::var("VICTORY_AMBIENT_FLOOR").unwrap_or_default();
-        set.trim().parse().ok().filter(|v: &f32| v.is_finite() && *v >= 0.0).unwrap_or(0.08)
+        set.trim().parse().ok().filter(|v: &f32| v.is_finite() && *v >= 0.0).unwrap_or(0.24)
     })
 }
 
@@ -273,10 +273,10 @@ void keep(uint3 at : SV_DispatchThreadID) {
     float3 sum = 0;
     for (uint y = 0; y < 5; y++) for (uint x = 0; x < 5; x++) {
         uint2 p = uint2((float2(at.xy) + (float2(x, y) + 0.5) / 5.0) * float2(w, h) / float2(CX, CY));
-        float3 c = max(radiance[p], 0.0);
-        c = any(isnan(c)) || any(isinf(c)) ? 0.0 : c;
+        float3 c = radiance[p];
+        c = any(isnan(c)) || any(isinf(c)) ? 0.0 : max(c, 0.0);
         // Lamps and glints count, but not for everything.
-        sum += c / max(1.0, dot(c, LUMA) / 36.0);
+        sum += c / max(1.0, dot(c, LUMA) / 24.0);
     }
     cells[at.y * CX + at.x] = float4(sum / 25.0, 1.0);
 }
@@ -288,15 +288,16 @@ void mean() {
     float lit_w = 0;
     for (uint i = 0; i < CELLS; i++) {
         float3 c = cells[i].rgb;
-        float w = saturate(dot(c, LUMA) * 24.0);
+        float w = saturate(dot(c, LUMA) * 6.0);
         sum += c;
         lit_sum += c * w;
         lit_w += w;
     }
     float4 was = cells[CELLS];
     float3 flat_mean = sum / CELLS;
-    float3 lit_mean = lit_sum / max(lit_w, 1.0);
-    float3 now = lerp(flat_mean, lit_mean, 0.80);
+    float lit_frac = lit_w / CELLS;
+    float3 lit_mean = lit_sum / max(lit_w, CELLS * 0.22);
+    float3 now = lerp(flat_mean, lit_mean, smoothstep(0.05, 0.30, lit_frac) * 0.85);
     // (`jump` > 0: a change of more than that factor either way is
     // followed at once, as a new room is.)
     float a = max(dot(now, LUMA), 1e-5), b = max(dot(was.rgb, LUMA), 1e-5);
@@ -313,8 +314,13 @@ void mean() {
 [numthreads(8, 4, 1)]
 void place(uint3 at : SV_DispatchThreadID) {
     float2 size = float2(width, height);
+    uint idx = at.y * CX + at.x;
     float3 p = seen(int2((float2(at.xy) + 0.5) * size / float2(CX, CY)), size);
-    cells[CELLS + 1 + at.y * CX + at.x] = float4(p, p.z * p.z);
+    float luma = dot(cells[idx].rgb, LUMA);
+    // Sky / distant background carries zero surface radiance; unweighted so
+    // sky texels (p.z = 1000) cannot swamp local bounce in gather().
+    float cell_w = (p.z > 320.0 && luma < 0.05) ? 0.0 : min(p.z * p.z, 2500.0);
+    cells[CELLS + 1 + idx] = float4(p, cell_w);
 }
 #endif
 
@@ -444,25 +450,34 @@ void raise(uint3 at : SV_DispatchThreadID) {
     float3 all = float3(sr.w, sg.w, sb.w) / sum;
     found = all + 0.85 * float3(dot(sr.xyz, n), dot(sg.xyz, n), dot(sb.xyz, n)) / sum;
     found = clamp(found, 0.35 * all, 2.0 * all);
+    if (any(isnan(found)) || any(isinf(found))) found = cells[CELLS].rgb;
     float hemi = 0.82 + 0.18 * clamp(n.y, -1.0, 1.0);
-    found = lerp(found, cells[CELLS].rgb, 0.45) * level * open;
-    float3 bounce_floor = cells[CELLS].rgb * (0.42 * level * hemi * open);
+    float3 sky_tint = lerp(float3(1.03, 0.99, 0.94), float3(0.94, 0.98, 1.05), saturate(n.y * 0.5 + 0.5));
+    found = lerp(found, cells[CELLS].rgb, 0.45) * level * open * sky_tint;
+    float3 bounce_floor = cells[CELLS].rgb * (0.50 * level * hemi * open) * sky_tint;
     found = max(found, bounce_floor);
     if (ambient_floor > 0.0) {
-        float3 floor_light = float3(0.96, 0.98, 1.0) * (ambient_floor * level * hemi * open);
-        found += floor_light / (1.0 + dot(found, LUMA) * 4.5);
+        float near_room = lerp(0.50, 1.0, 1.0 - smoothstep(8.0, 32.0, c.z));
+        float3 floor_light = float3(0.96, 0.98, 1.0) * (ambient_floor * level * hemi * open * near_room);
+        found += floor_light / (1.0 + dot(found, LUMA) * 4.0);
     }
     float3 was = unpack(light[p]);
-    // Filter magenta garbage probes left by uninitialized/corrupted memory on AMD.
-    if (was.g < 0.5 * min(was.r, was.b) && max(was.r, was.b) > 0.02) was = 0.0;
+    // Filter magenta and saturated pure-blue garbage probes left on AMD without BVH,
+    // without zeroing warm sodium streetlamps or red tail lights (R >= G >= B).
+    if ((was.g < 0.5 * min(was.r, was.b) && max(was.r, was.b) > 0.02)
+        || (was.b > 4.0 * max(was.r, was.g) && was.b > 0.40)) {
+        was = 0.0;
+    }
     float left = dot(was, LUMA);
-    // Keep the title's own local lamp and headlight indirect bounce up to
-    // `bound`, rather than discarding pixels where local light exceeds `found`.
+    // Keep genuine local lamp and headlight indirect bounce up to `bound`
+    // while tapering corrupted over-bright probe blocks toward `found`.
     float bound = fresh > 0.0 ? lerp(1.0, most, saturate(cells[CELLS].a / fresh)) : most;
-    float top = max(dot(found, LUMA), 0.40) * bound;
+    float top = max(dot(found, LUMA), 0.16) * bound;
     float has = dot(was, LUMA);
+    float trust = keep_was * saturate(2.0 - has / max(top, 1e-4));
     was *= min(1.0, top / max(has, 1e-6));
-    float3 written = lerp(found, max(was, found), keep_was);
+    float3 written = lerp(found, max(was, found), trust);
+    written = any(isnan(written)) || any(isinf(written)) ? found : written;
     light[p] = pack(written);
     if (probe != 0 && (at.x & 15) == 0 && (at.y & 15) == 0) {
         uint ignored;
