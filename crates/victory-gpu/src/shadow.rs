@@ -1310,18 +1310,60 @@ fn snapshots_kept() -> usize {
     *MOST.get_or_init(|| std::env::var("VICTORY_SNAPSHOT_POOL").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(1024))
 }
 
+/// Cap in bytes for the snapshot buffer pool (`VICTORY_SNAPSHOT_POOL_MB`,
+/// default 128 MiB on <= 32 GiB RAM hosts, 512 MiB otherwise).
+fn snapshot_pool_limit() -> usize {
+    static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        let default_mb = if crate::residency::host_is_ram_constrained() { 128 } else { 512 };
+        std::env::var("VICTORY_SNAPSHOT_POOL_MB")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .map_or(default_mb << 20, |mb| mb.min(1024) << 20)
+    })
+}
+
+/// Trims cached snapshot `Vec<u8>` buffers down to at most `max_bytes`,
+/// freeing backing allocations outside the lock.
+pub(crate) fn trim_snapshot_pool(max_bytes: usize) {
+    let gone: Vec<Vec<u8>> = {
+        let mut pool = POOL.lock().unwrap_or_else(|e| e.into_inner());
+        if pool.is_empty() {
+            return;
+        }
+        if max_bytes == 0 {
+            std::mem::take(&mut *pool)
+        } else {
+            pool.sort_by_key(|v| std::cmp::Reverse(v.capacity()));
+            let (mut kept, mut total) = (0, 0usize);
+            for v in pool.iter().take(snapshots_kept()) {
+                total = total.saturating_add(v.capacity());
+                if kept > 0 && total > max_bytes {
+                    break;
+                }
+                kept += 1;
+            }
+            pool.split_off(kept)
+        }
+    };
+    drop(gone);
+}
+
 /// Returns a snapshot buffer to the pool: at most [`snapshots_kept`] kept,
-/// the largest, and of those the largest one and the next ones up to `KEPT`
-/// bytes in all.
+/// the largest, and of those the largest one and the next ones up to the
+/// configured byte limit.
 fn give_back(v: Vec<u8>) {
-    const KEPT: usize = 512 << 20;
+    let cap_bytes = snapshot_pool_limit();
+    if cap_bytes == 0 {
+        return;
+    }
     let mut pool = POOL.lock().unwrap_or_else(|e| e.into_inner());
     pool.push(v);
     pool.sort_by_key(|v| std::cmp::Reverse(v.capacity()));
     let (mut kept, mut total) = (0, 0usize);
     for v in pool.iter().take(snapshots_kept()) {
         total = total.saturating_add(v.capacity());
-        if kept > 0 && total > KEPT {
+        if kept > 0 && total > cap_bytes {
             break;
         }
         kept += 1;
@@ -3004,26 +3046,63 @@ static WINDOW_BAND: std::sync::Mutex<crate::host::RamBand> =
 /// The next read of that memory makes a new copy and copies the window
 /// again. Called before a submission starts, by the thread that submits.
 pub(crate) fn let_go_idle() {
-    const IDLE_FRAMES: u64 = 4;
     let budget = window_budget();
-    let mut idle_ms = crate::host::ram_idle_ms(crate::host::available_physical_ram());
+    let idle_ms = crate::host::ram_idle_ms(crate::host::available_physical_ram());
+    let shared_pressure = crate::host::host_shared_pressure();
+    let_go_idle_inner(idle_ms, 4, budget, shared_pressure);
+}
+
+/// Sweeps loose windows and snapshot/exact pools according to DXGI Shared usage.
+pub(crate) fn trim_for_pressure(shared_pressure: u8) {
+    let cap_mb = match shared_pressure {
+        2.. => 16 << 20,
+        1 => 48 << 20,
+        0 if crate::residency::pressured() => 64 << 20,
+        0 => snapshot_pool_limit(),
+    };
+    trim_snapshot_pool(cap_mb.min(snapshot_pool_limit()));
+    let exact_cap = match shared_pressure {
+        2.. => 32,
+        1 => 96,
+        0 if crate::residency::pressured() => 96,
+        0 => 256,
+    };
+    trim_exact(exact_cap);
+}
+
+/// Emergency cleanup invoked when a DXGI `shared_buffer` (`L0` PC RAM) allocation
+/// hits `E_OUTOFMEMORY`: releases all idle windows, snapshot buffers, and unreferenced exact views.
+pub(crate) fn emergency_trim() {
+    trim_snapshot_pool(0);
+    trim_exact(0);
+    let_go_idle_inner(0, 0, Some(0), 2);
+}
+
+fn let_go_idle_inner(mut idle_ms: u64, idle_frames: u64, budget: Option<u64>, shared_pressure: u8) {
     let mut keep = u64::MAX;
-    if let Some(bytes) = budget
-        && let Some((working, private, free, commit, total, limit)) = crate::host::ram_sample()
-    {
+    if let Some((working, private, free, commit, total, limit)) = crate::host::ram_sample() {
         let mut band = WINDOW_BAND.lock().unwrap_or_else(|e| e.into_inner());
         *band = crate::host::ram_band(*band, working, private, free, commit, total, limit);
-        match *band {
-            crate::host::RamBand::Calm => {}
-            crate::host::RamBand::Watch => {
-                idle_ms = idle_ms.min(10_000);
-                keep = bytes;
-            }
-            crate::host::RamBand::High => {
-                idle_ms = idle_ms.min(2_000);
-                keep = bytes / 2;
+        if let Some(bytes) = budget {
+            match *band {
+                crate::host::RamBand::Calm => {}
+                crate::host::RamBand::Watch => {
+                    idle_ms = idle_ms.min(10_000);
+                    keep = bytes;
+                }
+                crate::host::RamBand::High => {
+                    idle_ms = idle_ms.min(2_000);
+                    keep = bytes / 2;
+                }
             }
         }
+    }
+    if shared_pressure >= 2 {
+        idle_ms = idle_ms.min(1_500);
+        keep = keep.min(budget.unwrap_or(1024 << 20) / 2);
+    } else if shared_pressure == 1 {
+        idle_ms = idle_ms.min(3_000);
+        keep = keep.min(budget.unwrap_or(1536 << 20));
     }
     let gone: Vec<Arc<Shadow>> = {
         // Held from the look to the removal: `loose` hands a copy out
@@ -3036,7 +3115,7 @@ pub(crate) fn let_go_idle() {
             .iter()
             .filter(|(_, s)| {
                 Arc::strong_count(s) == 1
-                    && crate::host::long_ago(s.used.load(Ordering::Relaxed), idle_ms, IDLE_FRAMES)
+                    && crate::host::long_ago(s.used.load(Ordering::Relaxed), idle_ms, idle_frames)
                     && crate::host::references(&s.buffer) == 1
             })
             .map(|(&key, s)| {
@@ -5696,6 +5775,36 @@ pub(crate) fn exact(address: u64, len: u64) -> Option<Arc<Shadow>> {
     EXACT_STATS[1].fetch_add(1, Ordering::Relaxed);
     OWN_MADE.fetch_add(1, Ordering::Relaxed);
     Some(shadow)
+}
+
+/// Drops idle entries from [`EXACT`] whose buffers have no live list/slot
+/// references until at most `max_kept` unreferenced entries remain.
+pub(crate) fn trim_exact(max_kept: usize) {
+    let mut gone: Vec<Arc<Shadow>> = Vec::new();
+    {
+        let mut guard = EXACT.lock().unwrap_or_else(|e| e.into_inner());
+        let (_, map) = &mut *guard;
+        if map.len() <= max_kept {
+            return;
+        }
+        let mut candidates: Vec<((u64, u64), u64)> = map
+            .iter()
+            .filter(|(_, (shadow, _))| {
+                Arc::strong_count(shadow) == 1 && crate::host::references(&shadow.buffer) == 1
+            })
+            .map(|(&k, v)| (k, v.1))
+            .collect();
+        candidates.sort_unstable_by_key(|&(_, used)| used);
+        let drop_n = map.len().saturating_sub(max_kept).min(candidates.len());
+        for (k, _) in candidates.into_iter().take(drop_n) {
+            if let Some((shadow, _)) = map.remove(&k) {
+                gone.push(shadow);
+            }
+        }
+    }
+    for shadow in gone {
+        crate::host::retire(shadow);
+    }
 }
 
 /// Copies of single views' bytes made since the start.

@@ -241,6 +241,51 @@ static IDLE: std::sync::Mutex<(Vec<Idle>, u64)> = std::sync::Mutex::new((Vec::ne
 #[cfg(windows)]
 const IDLE_MOST: (usize, u64) = (512, 256 << 20);
 
+/// Maximum idle host command-list/allocator pairs kept in `IDLE`. Each
+/// retained allocator holds driver/OS commit; 16 GB PCs default to `96`
+/// (still ~3 frames of submission headroom) or `VICTORY_LIST_POOL_MAX`.
+#[cfg(windows)]
+fn idle_most_count() -> usize {
+    static MAX: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *MAX.get_or_init(|| {
+        let default = if crate::residency::host_is_ram_constrained() { 96 } else { IDLE_MOST.0 };
+        std::env::var("VICTORY_LIST_POOL_MAX")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .map_or(default, |n| n.clamp(16, IDLE_MOST.0))
+    })
+}
+
+/// Drops excess idle command allocators/lists outside the lock so OS/WDDM
+/// private commit and budget buffers return promptly.
+#[cfg(windows)]
+pub(crate) fn trim_idle(target_len: usize) {
+    let gone: Vec<Idle> = {
+        let mut idle = IDLE.lock().unwrap_or_else(|e| e.into_inner());
+        if idle.0.len() <= target_len {
+            return;
+        }
+        let excess = idle.0.len() - target_len;
+        let drained: Vec<Idle> = idle.0.drain(0..excess).collect();
+        let bytes: u64 = drained.iter().map(|entry| entry.1).sum();
+        idle.1 = idle.1.saturating_sub(bytes);
+        drained
+    };
+    drop(gone);
+}
+
+#[cfg(windows)]
+pub(crate) fn trim_for_pressure(shared_pressure: u8) {
+    let cap = if shared_pressure >= 2 || crate::residency::pressured() {
+        24
+    } else if shared_pressure == 1 {
+        48
+    } else {
+        idle_most_count()
+    };
+    trim_idle(cap.min(idle_most_count()));
+}
+
 /// Whether host lists that have run are used again (on by default;
 /// `VICTORY_LIST_POOL=0`: each is made new and thrown away, as before).
 #[cfg(windows)]
@@ -276,11 +321,12 @@ pub(crate) fn recycle(lists: Vec<Detached>, ran: &[usize]) {
     if !pools() {
         return;
     }
+    let max_count = idle_most_count();
     for (i, Detached { host, _uploads, _state }) in lists.into_iter().enumerate() {
         // The descriptor slots and the upload memory its commands named.
         drop(_state);
         drop(_uploads);
-        if !ran.contains(&i) || IDLE.lock().unwrap_or_else(|e| e.into_inner()).0.len() >= IDLE_MOST.0 {
+        if !ran.contains(&i) || IDLE.lock().unwrap_or_else(|e| e.into_inner()).0.len() >= max_count {
             continue;
         }
         // As the title's reset does: what the list kept for its commands
@@ -288,7 +334,7 @@ pub(crate) fn recycle(lists: Vec<Detached>, ran: &[usize]) {
         host.reset();
         let bytes = host.scratch_kept();
         let mut idle = IDLE.lock().unwrap_or_else(|e| e.into_inner());
-        if idle.0.len() < IDLE_MOST.0 && idle.1 + bytes <= IDLE_MOST.1 {
+        if idle.0.len() < max_count && idle.1 + bytes <= IDLE_MOST.1 {
             idle.0.push(Idle(host, bytes));
             idle.1 += bytes;
         }

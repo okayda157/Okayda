@@ -2138,7 +2138,7 @@ pub(crate) fn let_go_idle() {
             let used = used.saturating_sub(crate::pool::texture_room())
                 + crate::shadow::card_room_kept()
                 + targets_room_kept();
-            crate::host::vram_keep(budget, used)
+            crate::host::vram_keep_configured(budget, used)
         }
         _ => (crate::host::vram_idle_ms(memory), u64::MAX),
     };

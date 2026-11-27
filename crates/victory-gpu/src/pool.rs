@@ -38,33 +38,68 @@ const STAGING_KEPT: usize = 8;
 /// How many are kept now.
 static SPARES: AtomicUsize = AtomicUsize::new(SPARE);
 
-/// Sets how many empty blocks stay, by the card's memory (budget and use):
-/// [`SPARE_KEPT`] below 85 % ([`crate::host::keep_freed`]), else [`SPARE`].
-/// Asked once a second.
-pub(crate) fn room(memory: Option<[u64; 4]>) {
-    if !crate::residency::on() {
-        SPARES.store(spares(memory, crate::host::keep_freed()), Ordering::Relaxed);
-        return;
-    }
-    // (`VICTORY_RESIDENCY=1`, codec-d/cool_fox c64fc9b4/e94d277a: fewer
-    // spares while the system is short of memory, and idle blocks let go now,
-    // not at the pool's next allocation.)
+fn staging_kept_max() -> usize {
+    static MAX: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *MAX.get_or_init(|| {
+        let default = if crate::residency::host_is_ram_constrained() { 2 } else { STAGING_KEPT };
+        std::env::var("VICTORY_STAGING_KEPT")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .map_or(default, |n| n.min(STAGING_KEPT * 2))
+    })
+}
+
+fn spares_max() -> usize {
+    static MAX: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *MAX.get_or_init(|| {
+        let default = if crate::residency::host_is_ram_constrained() { 6 } else { SPARE_KEPT };
+        std::env::var("VICTORY_POOL_SPARES_MAX")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .map_or(default, |n| n.min(SPARE_KEPT))
+    })
+}
+
+/// Sets how many empty blocks stay, by the card's memory (budget, use, and
+/// DXGI `NON_LOCAL` Shared pressure). Asked once a second; trims idle blocks
+/// regardless of `VICTORY_RESIDENCY=0` so empty 64 MiB blocks do not
+/// accumulate into Shared RAM or VRAM pressure.
+pub(crate) fn room_with_shared(memory: Option<[u64; 4]>, shared_pressure: u8) {
     let pressure = crate::residency::pressured();
-    let limit = spares(memory, crate::host::keep_freed() && !pressure);
+    let keep = crate::host::keep_freed() && !pressure && shared_pressure == 0;
+    let limit = if shared_pressure >= 2 {
+        0
+    } else if shared_pressure == 1 {
+        SPARE.min(spares_max())
+    } else {
+        spares(memory, keep).min(spares_max())
+    };
     SPARES.store(limit, Ordering::Relaxed);
     let tick = now();
     if let Ok(mut pool) = TEXTURES.try_lock() {
         pool.reclaim(tick, limit, true);
     }
     if let Ok(mut pool) = STAGING.try_lock() {
-        let staging_limit = if crate::residency::critical_commit() {
+        let staging_limit = if crate::residency::critical_commit() || shared_pressure >= 2 {
             0
-        } else if pressure {
-            1
+        } else if pressure || shared_pressure == 1 {
+            1.min(staging_kept_max())
         } else {
-            limit
+            limit.min(staging_kept_max())
         };
         pool.reclaim(tick, staging_limit, true);
+    }
+}
+
+/// Drops all idle empty staging and texture blocks immediately on OOM recovery.
+pub(crate) fn trim_staging_emergency() {
+    let tick = now();
+    SPARES.store(0, Ordering::Relaxed);
+    if let Ok(mut pool) = STAGING.try_lock() {
+        pool.reclaim(tick, 0, true);
+    }
+    if let Ok(mut pool) = TEXTURES.try_lock() {
+        pool.reclaim(tick, 0, true);
     }
 }
 

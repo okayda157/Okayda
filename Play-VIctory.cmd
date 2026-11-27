@@ -1,15 +1,8 @@
 @echo off
 setlocal EnableExtensions DisableDelayedExpansion
-if not defined VICTORY_GAME_DIR (
-  if exist "%~dp0..\GTA6.Xbox.v1.0.2.1\game_scarlett_master.exe" (
-    set "VICTORY_GAME_DIR=%~dp0..\GTA6.Xbox.v1.0.2.1"
-  ) else (
-    set "VICTORY_GAME_DIR=%~dp0..\GTA6.Xbox.v1.0.2.1"
-  )
-)
+if not defined VICTORY_GAME_DIR set "VICTORY_GAME_DIR=%~dp0..\GTA6.Xbox.v1.0.2.1"
 if not exist "%VICTORY_GAME_DIR%\game_scarlett_master.exe" (
   echo Set VICTORY_GAME_DIR to your own dump folder containing game_scarlett_master.exe. 1>&2
-  pause
   exit /b 2
 )
 
@@ -37,10 +30,32 @@ if not defined VICTORY_CACHE_DIR set "VICTORY_CACHE_DIR=%LOCALAPPDATA%\VIctory\c
 if not defined VICTORY_PANEL set "VICTORY_PANEL=1"
 if not defined VICTORY_PIPELINE_BOOK set "VICTORY_PIPELINE_BOOK=1"
 
-:: Sem limitadores de upload/prefetch; destrava threads no Xeon 10c/20t para reduzir SUB
+:: Dedicacao maxima segura na RX 6600 (8 GB GDDR6) mantendo margem anti-spill e RAM enxuta em 16 GB PC
+if not defined VICTORY_MEMORY_CARD_MB set "VICTORY_MEMORY_CARD_MB=2048"
+if not defined VICTORY_VRAM_RESERVE_MB set "VICTORY_VRAM_RESERVE_MB=2048"
+if not defined VICTORY_CARD_BUFFERS set "VICTORY_CARD_BUFFERS=1"
+if not defined VICTORY_CARD_BUFFERS_MIN_KB set "VICTORY_CARD_BUFFERS_MIN_KB=128"
+if not defined VICTORY_CARD_BUFFERS_MB set "VICTORY_CARD_BUFFERS_MB=1024"
+if not defined VICTORY_CARD_WINDOWS_MB set "VICTORY_CARD_WINDOWS_MB=0"
+if not defined VICTORY_WINDOW_BUDGET_MB set "VICTORY_WINDOW_BUDGET_MB=1024"
+if not defined VICTORY_CARD_ROOM_FOR_BUFFERS set "VICTORY_CARD_ROOM_FOR_BUFFERS=1"
+if not defined VICTORY_CARD_ROOM_FOR_TARGETS_MB set "VICTORY_CARD_ROOM_FOR_TARGETS_MB=1536"
+if not defined VICTORY_TEXTURE_ROOM_PERCENT set "VICTORY_TEXTURE_ROOM_PERCENT=85"
+if not defined VICTORY_VRAM_TARGET_PERCENT set "VICTORY_VRAM_TARGET_PERCENT=78"
+if not defined VICTORY_VRAM_EVICT_PERCENT set "VICTORY_VRAM_EVICT_PERCENT=85"
+if not defined VICTORY_POOL_KEEP_PERCENT set "VICTORY_POOL_KEEP_PERCENT=78"
+if not defined VICTORY_POOL_SPARES_MAX set "VICTORY_POOL_SPARES_MAX=6"
+if not defined VICTORY_STAGING_KEPT set "VICTORY_STAGING_KEPT=2"
+if not defined VICTORY_SCRATCH_KEPT_MB set "VICTORY_SCRATCH_KEPT_MB=64"
+if not defined VICTORY_SNAPSHOT_POOL_MB set "VICTORY_SNAPSHOT_POOL_MB=96"
+if not defined VICTORY_LIST_POOL_MAX set "VICTORY_LIST_POOL_MAX=96"
+if not defined VICTORY_BURY_LAG set "VICTORY_BURY_LAG=12"
+if not defined VICTORY_RIPE_BLOCKS set "VICTORY_RIPE_BLOCKS=4"
+
+:: Sem limitadores de upload/prefetch; destrava threads no Xeon 10c/20t mantendo staging enxuto
 if not defined VICTORY_RESIDENCY set "VICTORY_RESIDENCY=0"
 if not defined VICTORY_TEXTURE_CATCHUP set "VICTORY_TEXTURE_CATCHUP=1"
-if not defined VICTORY_TEXTURE_STAGE_MB set "VICTORY_TEXTURE_STAGE_MB=512"
+if not defined VICTORY_TEXTURE_STAGE_MB set "VICTORY_TEXTURE_STAGE_MB=256"
 if not defined VICTORY_PIPELINE_WORKERS set "VICTORY_PIPELINE_WORKERS=6"
 if not defined VICTORY_THIN_THREADS set "VICTORY_THIN_THREADS=8"
 if not defined VICTORY_UNDER_THREADS set "VICTORY_UNDER_THREADS=6"
@@ -48,22 +63,7 @@ if not defined VICTORY_VIEW_THREADS set "VICTORY_VIEW_THREADS=4"
 if not defined VICTORY_LAND_THREADS set "VICTORY_LAND_THREADS=6"
 if not defined VICTORY_FAST_CORES set "VICTORY_FAST_CORES=0"
 
-:: Dedicacao maxima segura na RX 6600 (8 GB GDDR6) evitando spillover de 7.5 GB para RAM/pagefile/HD
-if not defined VICTORY_MEMORY_CARD_MB set "VICTORY_MEMORY_CARD_MB=4608"
-if not defined VICTORY_VRAM_RESERVE_MB set "VICTORY_VRAM_RESERVE_MB=3817"
-if not defined VICTORY_CARD_BUFFERS set "VICTORY_CARD_BUFFERS=1"
-if not defined VICTORY_CARD_BUFFERS_MIN_KB set "VICTORY_CARD_BUFFERS_MIN_KB=128"
-if not defined VICTORY_CARD_BUFFERS_MB set "VICTORY_CARD_BUFFERS_MB=1280"
-if not defined VICTORY_CARD_WINDOWS_MB set "VICTORY_CARD_WINDOWS_MB=512"
-if not defined VICTORY_CARD_ROOM_FOR_BUFFERS set "VICTORY_CARD_ROOM_FOR_BUFFERS=1"
-if not defined VICTORY_CARD_ROOM_FOR_TARGETS_MB set "VICTORY_CARD_ROOM_FOR_TARGETS_MB=1536"
-if not defined VICTORY_TEXTURE_ROOM_PERCENT set "VICTORY_TEXTURE_ROOM_PERCENT=91"
-if not defined VICTORY_VRAM_TARGET_PERCENT set "VICTORY_VRAM_TARGET_PERCENT=88"
-if not defined VICTORY_VRAM_EVICT_PERCENT set "VICTORY_VRAM_EVICT_PERCENT=92"
-if not defined VICTORY_POOL_KEEP_PERCENT set "VICTORY_POOL_KEEP_PERCENT=86"
-if not defined VICTORY_RIPE_BLOCKS set "VICTORY_RIPE_BLOCKS=4"
-
-:: Aceleracao completa na GPU (compute offload + async submit)
+:: Aceleracao completa na GPU (compute offload + async submit, sem stage 2 bloated L0)
 if not defined VICTORY_ASYNC_SUBMIT set "VICTORY_ASYNC_SUBMIT=1"
 if not defined VICTORY_TEXTURE_NO_WAIT set "VICTORY_TEXTURE_NO_WAIT=1"
 if not defined VICTORY_RELAY set "VICTORY_RELAY=2"
@@ -72,7 +72,7 @@ if not defined VICTORY_CARD_REHASH_RUNS set "VICTORY_CARD_REHASH_RUNS=1"
 if not defined VICTORY_JOIN_COPIES set "VICTORY_JOIN_COPIES=1"
 if not defined VICTORY_INDIRECT_WINDOW set "VICTORY_INDIRECT_WINDOW=1"
 if not defined VICTORY_RELAY_COPY set "VICTORY_RELAY_COPY=1"
-if not defined VICTORY_CARD_STEPS set "VICTORY_CARD_STEPS=2"
+if not defined VICTORY_CARD_STEPS set "VICTORY_CARD_STEPS=1"
 if not defined VICTORY_INDIRECT_BATCH set "VICTORY_INDIRECT_BATCH=2"
 if not defined VICTORY_MAP_THREADS set "VICTORY_MAP_THREADS=1"
 if not defined VICTORY_TITLE_PRIORITIES set "VICTORY_TITLE_PRIORITIES=0"

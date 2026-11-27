@@ -113,12 +113,26 @@ pub(crate) fn allow_staging_growth(bake: bool) -> bool {
     has_growth_reserve(sample_commit(now), bake)
 }
 
+/// True when this host has <= 32 GiB RAM (or `VICTORY_RESIDENCY_LIMITED=1`),
+/// independent of `VICTORY_RESIDENCY=0` upload throttling so cleanup pools
+/// still size themselves safely for 16 GB PCs.
+pub(crate) fn host_is_ram_constrained() -> bool {
+    static CONSTRAINED: OnceLock<bool> = OnceLock::new();
+    *CONSTRAINED.get_or_init(|| {
+        std::env::var_os("VICTORY_RESIDENCY_LIMITED").is_some_and(|v| v == "1")
+            || memory_status().is_some_and(|s| s.ullTotalPhys <= 32 * GIB)
+    })
+}
+
+/// True when this host has <= 20 GiB physical RAM (e.g., 16 GB machines).
+pub(crate) fn host_is_16gb_class() -> bool {
+    static SMALL: OnceLock<bool> = OnceLock::new();
+    *SMALL.get_or_init(|| memory_status().is_some_and(|s| s.ullTotalPhys <= 20 * GIB))
+}
+
 pub(crate) fn limited_host_ram() -> bool {
     static LIMITED: OnceLock<bool> = OnceLock::new();
-    *LIMITED.get_or_init(|| {
-        on() && (std::env::var_os("VICTORY_RESIDENCY_LIMITED").is_some_and(|v| v == "1")
-            || memory_status().is_some_and(|s| s.ullTotalPhys <= 32 * GIB))
-    })
+    *LIMITED.get_or_init(|| on() && host_is_ram_constrained())
 }
 
 fn next_pressure(was: bool, physical: u64, commit: u64) -> bool {
@@ -129,11 +143,9 @@ fn next_pressure(was: bool, physical: u64, commit: u64) -> bool {
     }
 }
 
-/// Called by the once-per-second submission sweep. A failed sample keeps the last good state.
+/// Refreshes OS physical/commit headroom metrics regardless of whether
+/// `VICTORY_RESIDENCY=1` upload throttling is active, so idle pool trims still fire.
 pub(crate) fn refresh() {
-    if !on() {
-        return;
-    }
     let Some(status) = memory_status() else { return };
     let (physical, commit) = (status.ullAvailPhys, status.ullAvailPageFile);
     HEADROOM.store(physical.min(commit), Ordering::Relaxed);
@@ -141,20 +153,22 @@ pub(crate) fn refresh() {
     let pressure = next_pressure(was, physical, commit);
     if pressure != was {
         PRESSURED.store(pressure, Ordering::Relaxed);
-        if pressure {
-            tracing::warn!(
-                pid = std::process::id(),
-                frame = crate::frame::current(),
-                physical_free_mib = physical >> 20,
-                available_commit_mib = commit >> 20,
-                buffer_mirror_span_mib = crate::shadow::live_span_bytes() >> 20,
-                texture_staging_mib = crate::texture::live_staging_bytes() >> 20,
-                spare_scratch_mib = crate::host::ALIVE[4].load(Ordering::Relaxed) >> 20,
-                game_filled_gpu_texture_mib = crate::resource::KINDS[1].load(Ordering::Relaxed) >> 20,
-                "host memory pressure: limiting texture prefetch and idle upload storage"
-            );
-        } else {
-            tracing::info!(physical_free_mib = physical >> 20, available_commit_mib = commit >> 20, "host memory pressure cleared");
+        if on() {
+            if pressure {
+                tracing::warn!(
+                    pid = std::process::id(),
+                    frame = crate::frame::current(),
+                    physical_free_mib = physical >> 20,
+                    available_commit_mib = commit >> 20,
+                    buffer_mirror_span_mib = crate::shadow::live_span_bytes() >> 20,
+                    texture_staging_mib = crate::texture::live_staging_bytes() >> 20,
+                    spare_scratch_mib = crate::host::ALIVE[4].load(Ordering::Relaxed) >> 20,
+                    game_filled_gpu_texture_mib = crate::resource::KINDS[1].load(Ordering::Relaxed) >> 20,
+                    "host memory pressure: limiting texture prefetch and idle upload storage"
+                );
+            } else {
+                tracing::info!(physical_free_mib = physical >> 20, available_commit_mib = commit >> 20, "host memory pressure cleared");
+            }
         }
     }
 }

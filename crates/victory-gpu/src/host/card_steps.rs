@@ -642,8 +642,25 @@ impl Taken {
         // The host copies its steps held go; its commands stay until the
         // next use resets it.
         drop(std::mem::take(&mut *self.own.list.deferred()));
-        POOL.lock().unwrap_or_else(|e| e.into_inner()).push(self.own);
+        let mut pool = POOL.lock().unwrap_or_else(|e| e.into_inner());
+        let cap = if crate::residency::host_is_ram_constrained() { 16 } else { 64 };
+        if pool.len() < cap {
+            pool.push(self.own);
+        }
     }
+}
+
+/// Drops excess idle `card_steps` command lists and shared buffers.
+pub(crate) fn trim_idle(max_kept: usize) {
+    let gone: Vec<Own> = {
+        let mut pool = POOL.lock().unwrap_or_else(|e| e.into_inner());
+        if pool.len() <= max_kept {
+            return;
+        }
+        let excess = pool.len() - max_kept;
+        pool.drain(0..excess).collect()
+    };
+    drop(gone);
 }
 
 impl Host {

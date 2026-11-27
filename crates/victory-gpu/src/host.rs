@@ -166,6 +166,23 @@ pub(crate) fn available_physical_ram() -> Option<u64> {
 /// on: 61,000 of them in the first 300 s of session play-1125-0203, at 78 to
 /// 80 %, of which 13,000 were made and uploaded again.)
 pub(crate) fn vram_keep(budget: u64, used: u64) -> (u64, u64) {
+    vram_keep_with_thresholds(budget, used, 85, 93)
+}
+
+pub(crate) fn vram_keep_configured(budget: u64, used: u64) -> (u64, u64) {
+    static THRESHOLDS: OnceLock<(u64, u64)> = OnceLock::new();
+    let &(target, evict) = THRESHOLDS.get_or_init(|| {
+        let parse = |key: &str| std::env::var(key).ok().and_then(|v| v.trim().parse::<u64>().ok());
+        let evict = parse("VICTORY_VRAM_EVICT_PERCENT").unwrap_or(93).clamp(70, 98);
+        let target = parse("VICTORY_VRAM_TARGET_PERCENT")
+            .unwrap_or(85)
+            .clamp(55, evict.saturating_sub(1));
+        (target, evict)
+    });
+    vram_keep_with_thresholds(budget, used, target, evict)
+}
+
+fn vram_keep_with_thresholds(budget: u64, used: u64, target_pct: u64, evict_pct: u64) -> (u64, u64) {
     const KEPT_MS: u64 = 600_000;
     const IDLE_MS: u64 = 5_000;
     const SHORT_MS: u64 = 3_000;
@@ -173,12 +190,12 @@ pub(crate) fn vram_keep(budget: u64, used: u64) -> (u64, u64) {
         return (IDLE_MS, u64::MAX);
     }
     let share = |percent: u64| budget / 100 * percent;
-    if used < share(85) {
+    if used < share(target_pct) {
         (KEPT_MS, u64::MAX)
-    } else if used < share(93) {
-        (IDLE_MS, used - share(80))
+    } else if used < share(evict_pct) {
+        (IDLE_MS, used - share(target_pct.saturating_sub(5)))
     } else {
-        (SHORT_MS, used - share(84))
+        (SHORT_MS, used - share(evict_pct.saturating_sub(9).max(target_pct.saturating_sub(3))))
     }
 }
 
@@ -409,12 +426,25 @@ pub(crate) fn keep_freed() -> bool {
 /// when free physical RAM is low. Never returns less than 2,000 ms.
 /// With plenty of it five minutes ([`keep_freed`]).
 pub(crate) fn ram_idle_ms(avail_phys: Option<u64>) -> u64 {
-    // (`VICTORY_RESIDENCY=1`: the smaller of free RAM and free commit.)
+    static OVERRIDE_MS: OnceLock<Option<u64>> = OnceLock::new();
+    if let Some(ms) = *OVERRIDE_MS.get_or_init(|| {
+        std::env::var("VICTORY_RAM_IDLE_MS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+    }) {
+        return ms.max(1_000);
+    }
     let effective = match (avail_phys, crate::residency::headroom()) {
         (Some(a), Some(b)) => Some(a.min(b)),
         (a, b) => a.or(b),
     };
-    ram_idle_for(effective, keep_freed() && !crate::residency::limited_host_ram())
+    let mut ms = ram_idle_for(effective, keep_freed() && !crate::residency::host_is_ram_constrained());
+    match host_shared_pressure() {
+        2.. => ms = ms.min(1_500),
+        1 => ms = ms.min(4_000),
+        0 => {}
+    }
+    ms
 }
 
 fn ram_idle_for(avail_phys: Option<u64>, keep: bool) -> u64 {
@@ -569,10 +599,15 @@ fn sweep() {
     #[cfg(feature = "diagnostics")]
     crate::book::check();
     crate::residency::refresh();
-    if crate::residency::pressured() {
+    let groups = host().and_then(|h| h.video_memory_groups());
+    let shared_pressure = shared_pressure_for(groups.map(|g| g[1]));
+    if crate::residency::pressured() || shared_pressure > 0 {
         trim_spare_chunks();
     }
-    crate::pool::room(host().and_then(|h| h.video_memory()));
+    crate::pool::room_with_shared(groups.map(|g| g[0]), shared_pressure);
+    crate::list::trim_for_pressure(shared_pressure);
+    crate::shadow::trim_for_pressure(shared_pressure);
+    card_steps::trim_idle(if shared_pressure > 0 || crate::residency::pressured() { 4 } else { 16 });
     crate::pipeline::trim_library();
     crate::shadow::let_go_idle();
     crate::texture::let_go_idle();
@@ -622,7 +657,13 @@ pub(crate) fn retire_resource(object: ID3D12Resource) {
 fn bury_lag() -> u64 {
     static LAG: OnceLock<u64> = OnceLock::new();
     *LAG.get_or_init(|| {
-        let default = if crate::residency::limited_host_ram() { 16 } else { 64 };
+        let default = if crate::residency::host_is_16gb_class() {
+            12
+        } else if crate::residency::host_is_ram_constrained() {
+            16
+        } else {
+            64
+        };
         std::env::var("VICTORY_BURY_LAG").ok().and_then(|v| v.parse().ok()).unwrap_or(default)
     })
 }
@@ -636,6 +677,23 @@ fn bury(finished: u64) {
         let done: Vec<(u64, Retired)> = {
             let mut retired = part.lock().unwrap_or_else(|e| e.into_inner());
             let n = retired.iter().take_while(|(at, _)| *at <= finished).count();
+            if n == 0 {
+                continue;
+            }
+            retired.drain(..n).collect()
+        };
+        drop(done);
+    }
+}
+
+/// Emergency release of retired resources whose GPU submissions have already
+/// completed (retaining at most a 4-submission margin), called on `L0` Shared OOM.
+fn bury_emergency() {
+    let safe = FINISHED.load(Ordering::Acquire).saturating_sub(4);
+    for part in &RETIRED {
+        let done: Vec<(u64, Retired)> = {
+            let mut retired = part.lock().unwrap_or_else(|e| e.into_inner());
+            let n = retired.iter().take_while(|(at, _)| *at <= safe).count();
             if n == 0 {
                 continue;
             }
@@ -2097,6 +2155,28 @@ fn take_chunk(host: &Host, size: u64) -> Option<Chunk> {
     })
 }
 
+fn scratch_spare_limit() -> u64 {
+    static LIMIT: OnceLock<u64> = OnceLock::new();
+    let configured = *LIMIT.get_or_init(|| {
+        let default = if keep_freed() && !crate::residency::host_is_ram_constrained() {
+            SPARE_KEPT
+        } else {
+            SPARE_MOST
+        };
+        std::env::var("VICTORY_SCRATCH_KEPT_MB")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map_or(default, |mb| mb.min(1024) << 20)
+    });
+    if crate::residency::pressured() || host_shared_pressure() >= 2 {
+        0
+    } else if host_shared_pressure() == 1 {
+        configured.min(32 << 20)
+    } else {
+        configured
+    }
+}
+
 /// A list is done with `chunks` (it was reset after its submissions ran,
 /// or dropped): kept for the next list, or freed past [`SPARE_MOST`] and
 /// without the pool.
@@ -2105,11 +2185,11 @@ fn give_chunks(chunks: Vec<(Chunk, u64)>) {
         return;
     }
     let mut freed = Vec::new();
+    let limit = scratch_spare_limit();
     {
         let mut spare = SPARE.lock().unwrap_or_else(|e| e.into_inner());
         for (chunk, size) in chunks {
             let back = if scratch_pool() {
-                let limit = if keep_freed() && !crate::residency::limited_host_ram() { SPARE_KEPT } else { SPARE_MOST };
                 spare.give(chunk, size, limit)
             } else {
                 Some(chunk)
@@ -4956,120 +5036,191 @@ impl Host {
             fail(format_args!("no list, fence or event to fetch what shaders wrote to the card's memory (VICTORY_RELAY=1)"));
         };
         if f.buffer.as_ref().is_none_or(|b| b.2 < total) {
+            f.buffer = None;
             let size = total.next_multiple_of(16 << 20);
-            f.buffer = self.shared_buffer(size).map(|(buffer, data)| (buffer, data as usize, size));
+            let tight = total.next_multiple_of(1 << 20).max(4 << 20);
+            f.buffer = self
+                .shared_buffer(size)
+                .map(|(buffer, data)| (buffer, data as usize, size))
+                .or_else(|| {
+                    (tight < size)
+                        .then(|| self.shared_buffer(tight))
+                        .flatten()
+                        .map(|(buffer, data)| (buffer, data as usize, tight))
+                });
+            if f.buffer.is_none() && check.is_none() {
+                let max_piece = pieces.iter().map(|(_, lo, hi, _)| (hi - lo) as u64).max().unwrap_or(0);
+                let floor = max_piece.next_multiple_of(1 << 20).max(1 << 20);
+                for cap in [16 << 20, 8 << 20, 4 << 20, floor] {
+                    if cap >= max_piece
+                        && cap < tight
+                        && let Some((buffer, data)) = self.shared_buffer(cap)
+                    {
+                        f.buffer = Some((buffer, data as usize, cap));
+                        break;
+                    }
+                }
+            }
         }
-        let Some((buffer, data, _)) = f.buffer.clone() else {
+        let Some((buffer, data, buf_cap)) = f.buffer.clone() else {
             fail(format_args!("no memory to fetch what shaders wrote to the card's memory ({total} bytes, VICTORY_RELAY=1)"));
         };
-        f.sent += 1;
-        let ((allocator, list), fence, event, sent) = (f.list.clone(), f.fence.clone(), f.event, f.sent);
         let copy_queue = f.queue.clone();
-        let waiting = std::time::Instant::now();
         // The flights the fetch runs behind: those in the line by now have
         // been given to the queue. On the copy queue, those landed here.
         let ahead = match copy_queue {
             Some(_) => 0,
             None => line().target,
         };
-        // SAFETY: the list's last run was waited for by this thread; live
-        // buffers (the copies are held by the plans); the fence and the
-        // event are this thread's.
-        let ran = unsafe {
-            (|| -> windows::core::Result<u64> {
-                allocator.Reset()?;
-                list.Reset(&allocator, None)?;
-                for (shadow, lo, hi, at) in check.as_ref().map_or(&pieces, |c| &c.copies) {
-                    list.CopyBufferRegion(&buffer, *at, &shadow.buffer, *lo as u64, (*hi - *lo) as u64);
-                }
-                list.Close()?;
-                let lists = [Some(list.cast::<ID3D12CommandList>()?)];
-                let _fetching = crate::timeline::span("landing: fetching pieces");
-                if let Some(queue) = &copy_queue {
-                    queue.ExecuteCommandLists(&lists);
-                    queue.Signal(&fence, sent)?;
+        let mut run_fetch_batch = |f: &mut RelayFetch, batch: &[(std::sync::Arc<crate::shadow::Shadow>, usize, usize, u64)]| -> (u64, u64) {
+            f.sent += 1;
+            let ((allocator, list), fence, event, sent) = (f.list.clone(), f.fence.clone(), f.event, f.sent);
+            let waiting = std::time::Instant::now();
+            // SAFETY: the list's last run was waited for by this thread; live
+            // buffers (the copies are held by the plans); the fence and the
+            // event are this thread's.
+            let ran = unsafe {
+                (|| -> windows::core::Result<u64> {
+                    allocator.Reset()?;
+                    list.Reset(&allocator, None)?;
+                    for (shadow, lo, hi, at) in batch {
+                        list.CopyBufferRegion(&buffer, *at, &shadow.buffer, *lo as u64, (*hi - *lo) as u64);
+                    }
+                    list.Close()?;
+                    let lists = [Some(list.cast::<ID3D12CommandList>()?)];
+                    let _fetching = crate::timeline::span("landing: fetching pieces");
+                    if let Some(queue) = &copy_queue {
+                        queue.ExecuteCommandLists(&lists);
+                        queue.Signal(&fence, sent)?;
+                        meanwhile();
+                        fence.SetEventOnCompletion(sent, event)?;
+                        #[cfg(feature = "diagnostics")]
+                        let _card = crate::timeline::card_wait(None);
+                        WaitForSingleObject(event, INFINITE);
+                        return Ok(behind);
+                    }
+                    // In the order of the queue: the sends of title bytes so
+                    // far are ahead of this fetch, every later one behind it.
+                    let order = QUEUE_ORDER.lock().unwrap_or_else(|e| e.into_inner());
+                    self.queue.ExecuteCommandLists(&lists);
+                    let after = *order;
+                    drop(order);
+                    self.card_sent();
+                    self.queue.Signal(&fence, sent)?;
                     meanwhile();
                     fence.SetEventOnCompletion(sent, event)?;
                     #[cfg(feature = "diagnostics")]
                     let _card = crate::timeline::card_wait(None);
                     WaitForSingleObject(event, INFINITE);
-                    return Ok(behind);
-                }
-                // In the order of the queue: the sends of title bytes so
-                // far are ahead of this fetch, every later one behind it.
-                let order = QUEUE_ORDER.lock().unwrap_or_else(|e| e.into_inner());
-                self.queue.ExecuteCommandLists(&lists);
-                let after = *order;
-                drop(order);
-                self.card_sent();
-                self.queue.Signal(&fence, sent)?;
-                meanwhile();
-                fence.SetEventOnCompletion(sent, event)?;
-                #[cfg(feature = "diagnostics")]
-                let _card = crate::timeline::card_wait(None);
-                WaitForSingleObject(event, INFINITE);
-                Ok(after)
-            })()
+                    Ok(after)
+                })()
+            };
+            let after = match ran {
+                Ok(after) => after,
+                Err(e) => fail(format_args!("what shaders wrote to the card's memory could not be fetched ({e}, VICTORY_RELAY=1)")),
+            };
+            (after, waiting.elapsed().as_micros() as u64)
         };
-        let after = match ran {
-            Ok(after) => after,
-            Err(e) => fail(format_args!("what shaders wrote to the card's memory could not be fetched ({e}, VICTORY_RELAY=1)")),
-        };
-        let us = waiting.elapsed().as_micros() as u64;
-        RELAY_STATS[3].fetch_add(us, Ordering::Relaxed);
-        {
-            use crate::shadow::CARD_STATS;
-            CARD_STATS[3].fetch_add(pieces.len() as u64, Ordering::Relaxed);
-            CARD_STATS[4].fetch_add(total, Ordering::Relaxed);
-            CARD_STATS[5].fetch_add(1, Ordering::Relaxed);
-            CARD_STATS[6].fetch_add(us, Ordering::Relaxed);
-        }
-        let merging = std::time::Instant::now();
-        let _merging = crate::timeline::span("landing: merging fetched pieces");
-        let mut written = 0;
-        if land::on() {
-            let titles: Vec<(usize, usize)> =
-                pieces.iter().map(|(shadow, lo, hi, _)| (shadow.span().0 as usize + lo, hi - lo)).collect();
-            let jobs = land::jobs(&titles);
-            let put = std::sync::atomic::AtomicU64::new(0);
-            land::each(jobs.len(), &|j| {
-                let working = std::time::Instant::now();
-                if let Some(check) = &check {
-                    for i in jobs[j].clone() {
+        let merge_batch = |batch: &[(std::sync::Arc<crate::shadow::Shadow>, usize, usize, u64)], after: u64, use_check: Option<&torn::Check>| -> u64 {
+            let mut written = 0u64;
+            if land::on() {
+                let titles: Vec<(usize, usize)> =
+                    batch.iter().map(|(shadow, lo, hi, _)| (shadow.span().0 as usize + lo, hi - lo)).collect();
+                let jobs = land::jobs(&titles);
+                let put = std::sync::atomic::AtomicU64::new(0);
+                land::each(jobs.len(), &|j| {
+                    let working = std::time::Instant::now();
+                    if let Some(check) = use_check {
+                        for i in jobs[j].clone() {
+                            // SAFETY: as below.
+                            unsafe { check.look(i, data) };
+                        }
+                    }
+                    let mut notes = land::Notes::default();
+                    for run in batch[jobs[j].clone()].chunk_by(|a, b| std::sync::Arc::ptr_eq(&a.0, &b.0)) {
+                        let addressed: Vec<(usize, usize, usize)> =
+                            run.iter().map(|(_, lo, hi, at)| (*lo, *hi, data + *at as usize)).collect();
+                        // SAFETY: the mapping of the fetched bytes; the copy
+                        // into it has run, and the next waits for this call.
+                        put.fetch_add(unsafe { run[0].0.land_card(&addressed, after, &mut notes) }, Ordering::Relaxed);
+                    }
+                    notes.flush();
+                    land::spent(land::stat::CARD_ALL, working);
+                });
+                land::count(land::stat::JOBS, jobs.len() as u64);
+                written = put.into_inner();
+            } else {
+                let mut title = Vec::new();
+                for (i, (shadow, lo, hi, at)) in batch.iter().enumerate() {
+                    if let Some(check) = use_check {
                         // SAFETY: as below.
                         unsafe { check.look(i, data) };
                     }
+                    // SAFETY: the mapping of the fetched bytes; the copy into it has run.
+                    let gpu = unsafe { std::slice::from_raw_parts((data + *at as usize) as *const u8, hi - lo) };
+                    let merged = shadow.card_merge_relay(*lo, gpu, after, &mut title);
+                    shadow.walls_merged(gpu.len(), merged);
+                    written += merged as u64;
                 }
-                let mut notes = land::Notes::default();
-                for run in pieces[jobs[j].clone()].chunk_by(|a, b| std::sync::Arc::ptr_eq(&a.0, &b.0)) {
-                    let addressed: Vec<(usize, usize, usize)> =
-                        run.iter().map(|(_, lo, hi, at)| (*lo, *hi, data + *at as usize)).collect();
-                    // SAFETY: the mapping of the fetched bytes, `total` of
-                    // them; the copy into it has run, and the next waits
-                    // for this call.
-                    put.fetch_add(unsafe { run[0].0.land_card(&addressed, after, &mut notes) }, Ordering::Relaxed);
-                }
-                notes.flush();
-                land::spent(land::stat::CARD_ALL, working);
-            });
-            land::count(land::stat::JOBS, jobs.len() as u64);
-            written = put.into_inner();
-        } else {
-            let mut title = Vec::new();
-            for (i, (shadow, lo, hi, at)) in pieces.iter().enumerate() {
-                if let Some(check) = &check {
-                    // SAFETY: as below.
-                    unsafe { check.look(i, data) };
-                }
-                // SAFETY: the mapping of the fetched bytes, `total` of them;
-                // the copy into it has run.
-                let gpu = unsafe { std::slice::from_raw_parts((data + *at as usize) as *const u8, hi - lo) };
-                let merged = shadow.card_merge_relay(*lo, gpu, after, &mut title);
-                shadow.walls_merged(gpu.len(), merged);
-                written += merged as u64;
             }
+            written
+        };
+
+        let (after, written) = if check.is_some() || buf_cap >= total {
+            let batch = check.as_ref().map_or(&pieces, |c| &c.copies);
+            let (after, us) = run_fetch_batch(f, batch);
+            RELAY_STATS[3].fetch_add(us, Ordering::Relaxed);
+            {
+                use crate::shadow::CARD_STATS;
+                CARD_STATS[3].fetch_add(pieces.len() as u64, Ordering::Relaxed);
+                CARD_STATS[4].fetch_add(total, Ordering::Relaxed);
+                CARD_STATS[5].fetch_add(1, Ordering::Relaxed);
+                CARD_STATS[6].fetch_add(us, Ordering::Relaxed);
+            }
+            let merging = std::time::Instant::now();
+            let _merging = crate::timeline::span("landing: merging fetched pieces");
+            let written = merge_batch(batch, after, check.as_ref());
+            land::spent(land::stat::CARD, merging);
+            (after, written)
+        } else {
+            // Chunked fallback when a full single shared_buffer could not fit under L0 pressure.
+            let mut first_after = None;
+            let mut total_written = 0u64;
+            let mut i = 0;
+            while i < pieces.len() {
+                let mut batch = Vec::new();
+                let mut offset = 0u64;
+                while i < pieces.len() {
+                    let len = (pieces[i].2 - pieces[i].1) as u64;
+                    if !batch.is_empty() && offset + len > buf_cap {
+                        break;
+                    }
+                    batch.push((pieces[i].0.clone(), pieces[i].1, pieces[i].2, offset));
+                    offset += len;
+                    i += 1;
+                }
+                let (batch_after, us) = run_fetch_batch(f, &batch);
+                if first_after.is_none() {
+                    first_after = Some(batch_after);
+                }
+                RELAY_STATS[3].fetch_add(us, Ordering::Relaxed);
+                {
+                    use crate::shadow::CARD_STATS;
+                    CARD_STATS[3].fetch_add(batch.len() as u64, Ordering::Relaxed);
+                    CARD_STATS[4].fetch_add(offset, Ordering::Relaxed);
+                    CARD_STATS[5].fetch_add(1, Ordering::Relaxed);
+                    CARD_STATS[6].fetch_add(us, Ordering::Relaxed);
+                }
+                let merging = std::time::Instant::now();
+                let _merging = crate::timeline::span("landing: merging fetched pieces");
+                total_written += merge_batch(&batch, batch_after, None);
+                land::spent(land::stat::CARD, merging);
+            }
+            (first_after.unwrap_or(behind), total_written)
+        };
+        if buf_cap > (16 << 20) && host_shared_pressure() >= 1 {
+            f.buffer = None;
         }
-        land::spent(land::stat::CARD, merging);
         COPY_BACK[1].fetch_add(written, Ordering::Relaxed);
         if let Some(f) = fetch.as_mut() {
             if let Some(check) = &check {
@@ -5274,87 +5425,133 @@ impl Host {
         let mut written = vec![0usize; plan.ranges.len()];
         if !pieces.is_empty() {
             if work.fetched.as_ref().is_none_or(|f| f.2 < total) {
+                work.fetched = None;
                 let size = total.next_multiple_of(16 << 20);
-                work.fetched = self.shared_buffer(size).map(|(buffer, data)| (buffer, data as usize, size));
+                let tight = total.next_multiple_of(1 << 20).max(4 << 20);
+                work.fetched = self
+                    .shared_buffer(size)
+                    .map(|(buffer, data)| (buffer, data as usize, size))
+                    .or_else(|| {
+                        (tight < size)
+                            .then(|| self.shared_buffer(tight))
+                            .flatten()
+                            .map(|(buffer, data)| (buffer, data as usize, tight))
+                    });
+                if work.fetched.is_none() {
+                    let max_piece = pieces.iter().map(|&(_, lo, hi, _)| (hi - lo) as u64).max().unwrap_or(0);
+                    let floor = max_piece.next_multiple_of(1 << 20).max(1 << 20);
+                    for cap in [16 << 20, 8 << 20, 4 << 20, floor] {
+                        if cap >= max_piece
+                            && cap < tight
+                            && let Some((buffer, data)) = self.shared_buffer(cap)
+                        {
+                            work.fetched = Some((buffer, data as usize, cap));
+                            break;
+                        }
+                    }
+                }
             }
-            let Some((fetched, data, _)) = &work.fetched else {
+            let Some((fetched, data, buf_cap)) = work.fetched.clone() else {
                 fail(format_args!("no memory to fetch what shaders wrote to the card's memory ({total} bytes)"));
             };
-            let waiting = std::time::Instant::now();
-            let (allocator, list) = &work.fetch;
-            // SAFETY: the list's last run was waited for; live buffers; the
-            // fence and event are ours, under the submission lock.
-            let ran = unsafe {
-                (|| -> windows::core::Result<()> {
-                    allocator.Reset()?;
-                    list.Reset(allocator, None)?;
-                    for &(i, lo, hi, at) in &pieces {
-                        list.CopyBufferRegion(fetched, at, &plan.ranges[i].shadow.buffer, lo as u64, (hi - lo) as u64);
+            let mut run_batch = |batch: &[(usize, usize, usize, u64)], batch_bytes: u64| {
+                let waiting = std::time::Instant::now();
+                let (allocator, list) = &work.fetch;
+                // SAFETY: the list's last run was waited for; live buffers; the
+                // fence and event are ours, under the submission lock.
+                let ran = unsafe {
+                    (|| -> windows::core::Result<()> {
+                        allocator.Reset()?;
+                        list.Reset(allocator, None)?;
+                        for &(i, lo, hi, at) in batch {
+                            list.CopyBufferRegion(&fetched, at, &plan.ranges[i].shadow.buffer, lo as u64, (hi - lo) as u64);
+                        }
+                        list.Close()?;
+                        self.queue.ExecuteCommandLists(&[Some(list.cast()?)]);
+                        self.card_sent();
+                        *submitted += 1;
+                        self.queue.Signal(&self.fence, *submitted)?;
+                        self.fence.SetEventOnCompletion(*submitted, self.event)?;
+                        let was_working = working(false);
+                        WaitForSingleObject(self.event, INFINITE);
+                        stood(waiting);
+                        working(was_working);
+                        Ok(())
+                    })()
+                };
+                if let Err(e) = ran {
+                    fail(format_args!("what shaders wrote to the card's memory could not be fetched ({e})"));
+                }
+                {
+                    use crate::shadow::CARD_STATS;
+                    CARD_STATS[3].fetch_add(batch.len() as u64, Ordering::Relaxed);
+                    CARD_STATS[4].fetch_add(batch_bytes, Ordering::Relaxed);
+                    CARD_STATS[5].fetch_add(1, Ordering::Relaxed);
+                    CARD_STATS[6].fetch_add(waiting.elapsed().as_micros() as u64, Ordering::Relaxed);
+                }
+                if wide_merge() && batch.len() >= 8 {
+                    // The pieces are apart from one another (each its own bytes
+                    // of its copy and of title memory): several at a time.
+                    let counts: std::sync::Arc<Vec<std::sync::atomic::AtomicUsize>> =
+                        std::sync::Arc::new((0..plan.ranges.len()).map(|_| std::sync::atomic::AtomicUsize::new(0)).collect());
+                    let each = batch.len().div_ceil(8);
+                    let jobs: Vec<Box<dyn FnOnce() + Send>> = batch
+                        .chunks(each)
+                        .map(|chunk| {
+                            let chunk: Vec<(std::sync::Arc<crate::shadow::Shadow>, usize, usize, usize, u64)> =
+                                chunk.iter().map(|&(i, lo, hi, at)| (plan.ranges[i].shadow.clone(), i, lo, hi, at)).collect();
+                            let counts = counts.clone();
+                            Box::new(move || {
+                                let mut title = Vec::new();
+                                for (shadow, i, lo, hi, at) in chunk {
+                                    // SAFETY: the mapping of the fetched bytes;
+                                    // the copy into it has run, and the caller
+                                    // waits for this job.
+                                    let gpu = unsafe { std::slice::from_raw_parts((data + at as usize) as *const u8, hi - lo) };
+                                    let merged = shadow.card_merge(lo, gpu, &mut title);
+                                    shadow.walls_merged(gpu.len(), merged);
+                                    counts[i].fetch_add(merged, Ordering::Relaxed);
+                                }
+                            }) as Box<dyn FnOnce() + Send>
+                        })
+                        .collect();
+                    crate::shadow::wide_run(jobs);
+                    for (written, count) in written.iter_mut().zip(counts.iter()) {
+                        *written += count.load(Ordering::Relaxed);
                     }
-                    list.Close()?;
-                    self.queue.ExecuteCommandLists(&[Some(list.cast()?)]);
-                    self.card_sent();
-                    *submitted += 1;
-                    self.queue.Signal(&self.fence, *submitted)?;
-                    self.fence.SetEventOnCompletion(*submitted, self.event)?;
-                    let was_working = working(false);
-                    WaitForSingleObject(self.event, INFINITE);
-                    stood(waiting);
-                    working(was_working);
-                    Ok(())
-                })()
+                } else {
+                    let mut title = Vec::new();
+                    for &(i, lo, hi, at) in batch {
+                        // SAFETY: the mapping of the fetched bytes;
+                        // the copy into it has run.
+                        let gpu = unsafe { std::slice::from_raw_parts((data + at as usize) as *const u8, hi - lo) };
+                        let merged = plan.ranges[i].shadow.card_merge(lo, gpu, &mut title);
+                        plan.ranges[i].shadow.walls_merged(gpu.len(), merged);
+                        written[i] += merged;
+                    }
+                }
             };
-            if let Err(e) = ran {
-                fail(format_args!("what shaders wrote to the card's memory could not be fetched ({e})"));
-            }
-            {
-                use crate::shadow::CARD_STATS;
-                CARD_STATS[3].fetch_add(pieces.len() as u64, Ordering::Relaxed);
-                CARD_STATS[4].fetch_add(total, Ordering::Relaxed);
-                CARD_STATS[5].fetch_add(1, Ordering::Relaxed);
-                CARD_STATS[6].fetch_add(waiting.elapsed().as_micros() as u64, Ordering::Relaxed);
-            }
-            if wide_merge() && pieces.len() >= 8 {
-                // The pieces are apart from one another (each its own bytes
-                // of its copy and of title memory): several at a time.
-                let fetched = *data;
-                let counts: std::sync::Arc<Vec<std::sync::atomic::AtomicUsize>> =
-                    std::sync::Arc::new((0..plan.ranges.len()).map(|_| std::sync::atomic::AtomicUsize::new(0)).collect());
-                let each = pieces.len().div_ceil(8);
-                let jobs: Vec<Box<dyn FnOnce() + Send>> = pieces
-                    .chunks(each)
-                    .map(|chunk| {
-                        let chunk: Vec<(std::sync::Arc<crate::shadow::Shadow>, usize, usize, usize, u64)> =
-                            chunk.iter().map(|&(i, lo, hi, at)| (plan.ranges[i].shadow.clone(), i, lo, hi, at)).collect();
-                        let counts = counts.clone();
-                        Box::new(move || {
-                            let mut title = Vec::new();
-                            for (shadow, i, lo, hi, at) in chunk {
-                                // SAFETY: the mapping of the fetched bytes;
-                                // the copy into it has run, and the caller
-                                // waits for this job.
-                                let gpu = unsafe { std::slice::from_raw_parts((fetched + at as usize) as *const u8, hi - lo) };
-                                let merged = shadow.card_merge(lo, gpu, &mut title);
-                                shadow.walls_merged(gpu.len(), merged);
-                                counts[i].fetch_add(merged, Ordering::Relaxed);
-                            }
-                        }) as Box<dyn FnOnce() + Send>
-                    })
-                    .collect();
-                crate::shadow::wide_run(jobs);
-                for (written, count) in written.iter_mut().zip(counts.iter()) {
-                    *written += count.load(Ordering::Relaxed);
-                }
+            if buf_cap >= total {
+                run_batch(&pieces, total);
             } else {
-                let mut title = Vec::new();
-                for &(i, lo, hi, at) in &pieces {
-                    // SAFETY: the mapping of the fetched bytes, `total` of
-                    // them; the copy into it has run.
-                    let gpu = unsafe { std::slice::from_raw_parts((*data + at as usize) as *const u8, hi - lo) };
-                    let merged = plan.ranges[i].shadow.card_merge(lo, gpu, &mut title);
-                    plan.ranges[i].shadow.walls_merged(gpu.len(), merged);
-                    written[i] += merged;
+                let mut idx = 0;
+                while idx < pieces.len() {
+                    let mut batch = Vec::new();
+                    let mut offset = 0u64;
+                    while idx < pieces.len() {
+                        let len = (pieces[idx].2 - pieces[idx].1) as u64;
+                        if !batch.is_empty() && offset + len > buf_cap {
+                            break;
+                        }
+                        batch.push((pieces[idx].0, pieces[idx].1, pieces[idx].2, offset));
+                        offset += len;
+                        idx += 1;
+                    }
+                    run_batch(&batch, offset);
                 }
+            }
+            if buf_cap > (16 << 20) && host_shared_pressure() >= 1 {
+                work.fetched = None;
             }
         }
         for (r, written) in plan.ranges.iter().zip(written) {
@@ -9088,6 +9285,40 @@ fn for_pieces(start: usize, len: usize, step: usize, mut f: impl FnMut(usize, us
     }
 }
 
+/// Shared-GPU-RAM (`DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL`) pressure band:
+/// `0` = Calm (`< 72%`), `1` = Watch (`72%..84%`), `2` = High (`>= 84%`).
+pub(crate) fn shared_pressure_for(shared: Option<[u64; 4]>) -> u8 {
+    let Some([budget, used, ..]) = shared else {
+        return 0;
+    };
+    if budget == 0 {
+        return 0;
+    }
+    let pct = (u128::from(used) * 100) / u128::from(budget);
+    if pct >= 84 {
+        2
+    } else if pct >= 72 {
+        1
+    } else {
+        0
+    }
+}
+
+/// Cached 100 ms sample of DXGI `NON_LOCAL` Shared GPU RAM pressure (`0`, `1`, `2`).
+pub(crate) fn host_shared_pressure() -> u8 {
+    static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let slot = coarse_ms() / 100 + 1;
+    let packed = LAST.load(Ordering::Relaxed);
+    if packed >> 2 == slot {
+        return (packed & 3) as u8;
+    }
+    let band = host()
+        .and_then(|h| h.video_memory_groups())
+        .map_or(0, |g| shared_pressure_for(Some(g[1])));
+    LAST.store((slot << 2) | u64::from(band), Ordering::Relaxed);
+    band
+}
+
 impl Host {
     /// The queue everything of ours runs on, for a call that must go to it
     /// in order with the lists (`crate::tiles`: a texture's levels are
@@ -9138,9 +9369,7 @@ impl Host {
         }
     }
 
-    pub(crate) fn upload_buffer(&self, size: u64) -> Option<(ID3D12Resource, *mut u8)> {
-        MADE[0].fetch_add(1, Ordering::Relaxed);
-        MADE[1].fetch_add(size, Ordering::Relaxed);
+    fn try_upload_buffer(&self, size: u64) -> windows::core::Result<(ID3D12Resource, *mut u8)> {
         let heap = D3D12_HEAP_PROPERTIES {
             Type: D3D12_HEAP_TYPE_UPLOAD,
             ..Default::default()
@@ -9161,7 +9390,7 @@ impl Host {
         let mut buffer: Option<ID3D12Resource> = None;
         let mut data = std::ptr::null_mut();
         // SAFETY: plain creation and mapping of an upload buffer.
-        let made = unsafe {
+        unsafe {
             self.device
                 .CreateCommittedResource(
                     &heap,
@@ -9175,20 +9404,31 @@ impl Host {
                     let b = buffer.as_ref().ok_or_else(windows::core::Error::empty)?;
                     resident(&self.device, b)?;
                     b.Map(0, None, Some(&mut data))
-                })
-        };
+                })?;
+        }
         #[cfg(feature = "diagnostics")]
-        if made.is_ok()
-            && let Some(b) = &buffer
-        {
+        if let Some(b) = &buffer {
             crate::book::made(b, || "an upload buffer".into());
         }
-        match made {
-            Ok(()) => Some((buffer?, data.cast())),
-            Err(e) => {
-                crate::residency::allocation_error(&e);
-                tracing::warn!(error = %e, size, "no upload buffer");
-                None
+        Ok((buffer.ok_or_else(windows::core::Error::empty)?, data.cast()))
+    }
+
+    pub(crate) fn upload_buffer(&self, size: u64) -> Option<(ID3D12Resource, *mut u8)> {
+        MADE[0].fetch_add(1, Ordering::Relaxed);
+        MADE[1].fetch_add(size, Ordering::Relaxed);
+        match self.try_upload_buffer(size) {
+            Ok(ok) => Some(ok),
+            Err(first_err) => {
+                self.reclaim_memory_for_oom();
+                match self.try_upload_buffer(size) {
+                    Ok(ok) => Some(ok),
+                    Err(e) => {
+                        crate::residency::allocation_error(&first_err);
+                        crate::residency::allocation_error(&e);
+                        tracing::warn!(error = %e, size, "no upload buffer");
+                        None
+                    }
+                }
             }
         }
     }
@@ -10171,13 +10411,7 @@ impl Host {
         );
     }
 
-    /// A buffer in system memory that the CPU maps (write-back, so reading
-    /// it is fast too) and shaders read and write: for host copies of title
-    /// memory that shaders write, which upload memory cannot be. Starts in
-    /// the common state (buffers move out of it implicitly).
-    pub(crate) fn shared_buffer(&self, size: u64) -> Option<(ID3D12Resource, *mut u8)> {
-        MADE[2].fetch_add(1, Ordering::Relaxed);
-        MADE[3].fetch_add(size, Ordering::Relaxed);
+    fn try_shared_buffer(&self, size: u64) -> windows::core::Result<(ID3D12Resource, *mut u8)> {
         let heap = D3D12_HEAP_PROPERTIES {
             Type: D3D12_HEAP_TYPE_CUSTOM,
             CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_WRITE_BACK,
@@ -10201,7 +10435,7 @@ impl Host {
         let mut buffer: Option<ID3D12Resource> = None;
         let mut data = std::ptr::null_mut();
         // SAFETY: plain creation and mapping of a CPU-visible buffer.
-        let made = unsafe {
+        unsafe {
             self.device
                 .CreateCommittedResource(
                     &heap,
@@ -10216,19 +10450,60 @@ impl Host {
                     resident(&self.device, b)?;
                     mapped(&self.device)?;
                     b.Map(0, None, Some(&mut data))
-                })
-        };
+                })?;
+        }
         #[cfg(feature = "diagnostics")]
-        if made.is_ok()
-            && let Some(b) = &buffer
-        {
+        if let Some(b) = &buffer {
             crate::book::made(b, || "a shared buffer".into());
         }
-        match made {
-            Ok(()) => Some((buffer?, data.cast())),
-            Err(e) => {
-                tracing::warn!(error = %e, size, "no shared buffer");
-                None
+        Ok((buffer.ok_or_else(windows::core::Error::empty)?, data.cast()))
+    }
+
+    /// Frees idle pools, snapshots, windows, and GPU-finished retired buffers
+    /// when a `L0` Shared allocation fails with `E_OUTOFMEMORY`.
+    fn reclaim_memory_for_oom(&self) {
+        static LAST_OOM_RECLAIM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let now = now_ms();
+        let prev = LAST_OOM_RECLAIM.load(Ordering::Relaxed);
+        if now < prev.saturating_add(250)
+            || LAST_OOM_RECLAIM
+                .compare_exchange(prev, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_err()
+        {
+            return;
+        }
+        trim_spare_chunks();
+        crate::pool::trim_staging_emergency();
+        crate::list::trim_idle(8);
+        card_steps::trim_idle(0);
+        crate::shadow::emergency_trim();
+        crate::pipeline::trim_library();
+        bury_emergency();
+    }
+
+    /// A buffer in system memory that the CPU maps (write-back, so reading
+    /// it is fast too) and shaders read and write: for host copies of title
+    /// memory that shaders write, which upload memory cannot be. Starts in
+    /// the common state (buffers move out of it implicitly).
+    pub(crate) fn shared_buffer(&self, size: u64) -> Option<(ID3D12Resource, *mut u8)> {
+        MADE[2].fetch_add(1, Ordering::Relaxed);
+        MADE[3].fetch_add(size, Ordering::Relaxed);
+        match self.try_shared_buffer(size) {
+            Ok(ok) => Some(ok),
+            Err(first_err) => {
+                self.reclaim_memory_for_oom();
+                match self.try_shared_buffer(size) {
+                    Ok(ok) => {
+                        tracing::info!(size, "recovered L0 shared buffer after emergency reclaim");
+                        Some(ok)
+                    }
+                    Err(e) => {
+                        crate::residency::allocation_error(&first_err);
+                        crate::residency::allocation_error(&e);
+                        tracing::warn!(error = %e, size, "no shared buffer");
+                        None
+                    }
+                }
             }
         }
     }
@@ -11505,6 +11780,22 @@ mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at 
         assert_eq!(ram_idle_ms(Some(0)), 2_000);
         // Missing falls back to normal
         assert_eq!(ram_idle_ms(None), 10_000);
+    }
+
+    #[test]
+    fn shared_pressure_and_custom_vram_thresholds_scale() {
+        assert_eq!(super::shared_pressure_for(None), 0);
+        assert_eq!(super::shared_pressure_for(Some([0, 500, 0, 0])), 0);
+        assert_eq!(super::shared_pressure_for(Some([100, 71, 0, 0])), 0);
+        assert_eq!(super::shared_pressure_for(Some([100, 72, 0, 0])), 1);
+        assert_eq!(super::shared_pressure_for(Some([100, 83, 0, 0])), 1);
+        assert_eq!(super::shared_pressure_for(Some([100, 84, 0, 0])), 2);
+        assert_eq!(super::shared_pressure_for(Some([7450, 7697, 0, 0])), 2);
+
+        let gib = 1 << 30;
+        assert_eq!(super::vram_keep_with_thresholds(100 * gib, 77 * gib, 78, 85).0, 600_000);
+        assert_eq!(super::vram_keep_with_thresholds(100 * gib, 80 * gib, 78, 85), (5_000, 7 * gib));
+        assert_eq!(super::vram_keep_with_thresholds(100 * gib, 90 * gib, 78, 85), (3_000, 14 * gib));
     }
 }
 
